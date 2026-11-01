@@ -8,6 +8,7 @@
 // shows as blotches the clip used to hide.
 
 #include "./shared.h"
+#include "./vision_hdr.hlsli"
 
 sampler2D wobble : register(s0);
 sampler2D image : register(s3);
@@ -18,36 +19,7 @@ sampler2D level_3 : register(s7);
 
 float4 level_weights[4] : register(c0);  // the game's, still set from its sum of the levels
 
-// The image is gamma-encoded; the excess and its limit are worked out in linear light.
-static const float GAMMA = 2.2f;
-// The excess eases in over this much either side of white (linear), so its onset has no crease.
-static const float EXCESS_KNEE = 0.25f;
-// R2 low-discrepancy dither (Roberts) over the pixel position against HDR10 banding: peak to peak
-// DITHER_STRENGTH of the colour (linear), full once the layer adds 1 / DITHER_ONSET of white.
-static const float2 DITHER_PATTERN = float2(0.7548776662f, 0.5698402910f);
-static const float DITHER_STRENGTH = 0.018f;
-static const float DITHER_ONSET = 16.f;
 static const float SMOOTHING_WEIGHTS[4] = {0.125f, 0.375f, 0.375f, 0.125f};
-
-// Cubic B-spline upsampling from 4 bilinear taps (Sigg and Hadwiger, GPU Gems 2, ch. 20). The
-// coarsest level is tiny, and the excess amplifies the creases its bilinear upsampling leaves at
-// every texel edge.
-float3 CubicSample(sampler2D level, float2 texcoord, float size) {
-  const float2 position = texcoord * size - 0.5f;
-  const float2 f = frac(position);
-  const float2 f2 = f * f;
-  const float2 f3 = f2 * f;
-  const float2 w0 = (1.f - 3.f * f + 3.f * f2 - f3) / 6.f;
-  const float2 w1 = (4.f - 6.f * f2 + 3.f * f3) / 6.f;
-  const float2 w3 = f3 / 6.f;
-  const float2 first_weight = w0 + w1;
-  const float2 corner = position - f;
-  const float2 first_tap = (corner - 0.5f + w1 / first_weight) / size;
-  const float2 second_tap = (corner + 1.5f + w3 / (1.f - first_weight)) / size;
-  return lerp(lerp(tex2D(level, second_tap).rgb, tex2D(level, float2(first_tap.x, second_tap.y)).rgb, first_weight.x),
-              lerp(tex2D(level, float2(second_tap.x, first_tap.y)).rgb, tex2D(level, first_tap).rgb, first_weight.x),
-              first_weight.y);
-}
 
 float4 main(float2 texcoord_0 : TEXCOORD0, float2 texcoord_3 : TEXCOORD3, float2 pixel_position : VPOS) : COLOR {
   // texbem: u += M00 * du + M10 * dv, v += M01 * du + M11 * dv.
@@ -66,23 +38,10 @@ float4 main(float2 texcoord_0 : TEXCOORD0, float2 texcoord_3 : TEXCOORD3, float2
       fine_sum += weight * (tex2D(level_0, tap).rgb * level_weights[0].rgb + tex2D(level_1, tap).rgb * level_weights[1].rgb + tex2D(level_2, tap).rgb * level_weights[2].rgb);
     }
   }
-  const float3 levels_sum = fine_sum + CubicSample(level_3, texcoord, CUSTOM_EMF_LEVEL_SIZES.w) * level_weights[3].rgb;
-  const float sum_peak = max(0.f, max(levels_sum.r, max(levels_sum.g, levels_sum.b)));
-  const float past_white = pow(sum_peak, GAMMA) - 1.f;
-  float excess = max(0.f, past_white);
-  if (abs(past_white) < EXCESS_KNEE) {
-    excess = (past_white + EXCESS_KNEE) * (past_white + EXCESS_KNEE) / (4.f * EXCESS_KNEE);
-  }
-  // At most what Peak leaves above white (linear): x / (1 + x / limit) approaches it without
-  // reaching it, so the excess rolls off toward Peak instead of clipping flat there.
-  const float limit = max(1e-3f, CUSTOM_VISION_PEAK_RATIO - 1.f);
+  const float3 levels_sum = fine_sum + CubicSample(level_3, texcoord, CUSTOM_EMF_LEVEL_SIZES.ww).rgb * level_weights[3].rgb;
   const float image_peak = max(color.r, max(color.g, color.b));
-  // In the image's own colour at white, which keeps the hue the game clips to.
-  const float added = excess / (1.f + excess / limit) * saturate(image_peak * 2.f - 1.f);
-  const float3 image_white = pow(color.rgb / max(image_peak, 1e-4f), GAMMA);
-  const float dither = frac(dot(pixel_position, DITHER_PATTERN)) - 0.5f;
-  const float3 linear_color = (pow(color.rgb, GAMMA) + added * image_white)
-                              * (1.f + dither * DITHER_STRENGTH * saturate(added * DITHER_ONSET));
-  color.rgb = pow(max(0.f, linear_color), 1.f / GAMMA);
+  const float added = RolledOffExcess(max(levels_sum.r, max(levels_sum.g, levels_sum.b)), CUSTOM_VISION_PEAK_RATIO)
+                      * saturate(image_peak * 2.f - 1.f);
+  color.rgb = AddLight(color.rgb, added, pixel_position);
   return color;
 }
