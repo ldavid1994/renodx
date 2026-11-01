@@ -1672,12 +1672,17 @@ static void OnPresent(
     auto* native = reinterpret_cast<IDirect3DDevice9*>(device->get_native());
     auto* src_res = reinterpret_cast<IDirect3DResource9*>(swapchain_clone.handle);
     auto* dst_res = reinterpret_cast<IDirect3DResource9*>(shared_pair.host_shared_resource.handle);
-    IDirect3DSurface9* src_surface;
-    IDirect3DSurface9* dst_surface;
+    // Both surfaces hold a reference until after the copy: GetSurfaceLevel adds one, so the
+    // surface case adds one too. Without the Release below, every present leaked a reference to
+    // the clone and the host shared texture, which kept the D3D9 device alive after the game
+    // released it.
+    IDirect3DSurface9* src_surface = nullptr;
+    IDirect3DSurface9* dst_surface = nullptr;
 
     switch (src_res->GetType()) {
       case D3DRTYPE_SURFACE:
         src_surface = static_cast<IDirect3DSurface9*>(src_res);
+        src_surface->AddRef();
         break;
       case D3DRTYPE_TEXTURE: {
         auto* tex = static_cast<IDirect3DTexture9*>(src_res);
@@ -1691,6 +1696,7 @@ static void OnPresent(
     switch (dst_res->GetType()) {
       case D3DRTYPE_SURFACE:
         dst_surface = static_cast<IDirect3DSurface9*>(dst_res);
+        dst_surface->AddRef();
         break;
       case D3DRTYPE_TEXTURE: {
         auto* tex = static_cast<IDirect3DTexture9*>(dst_res);
@@ -1712,6 +1718,12 @@ static void OnPresent(
       reshade::log::message(reshade::log::level::error, s.str().c_str());
     }
     assert(SUCCEEDED(copy_hr));
+    if (src_surface != nullptr) {
+      src_surface->Release();
+    }
+    if (dst_surface != nullptr) {
+      dst_surface->Release();
+    }
   } else {
     queue->get_immediate_command_list()->copy_resource(swapchain_clone, shared_pair.host_shared_resource);
   }
