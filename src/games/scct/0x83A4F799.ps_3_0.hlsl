@@ -38,6 +38,13 @@ float4 main(float4 texcoord : TEXCOORD0) : COLOR {
   }
   else {
     float3 untonemapped = renodx::color::srgb::DecodeSafe(composite);
+    // Peak in Game Brightness units. With Gamma Correction 2.2, RenderIntermediatePass maps sRGB-decoded
+    // values to 2.2-decoded ones, so the peak is pre-corrected the same way ToneMapPass does it.
+    // The add-on keeps it at 1 or more.
+    float peak = RENODX_PEAK_WHITE_NITS / RENODX_DIFFUSE_WHITE_NITS;
+    if (RENODX_GAMMA_CORRECTION > 0.f) {
+      peak = renodx::color::correct::Gamma(peak, true, 2.2f);
+    }
     [branch] if (RENODX_TONE_MAP_TYPE == SCCT_TONE_MAP_TYPE_PSYCHO_V) {
       // Shadows below 50 darken with RenoDRT's curve (renodx::color::grade::ApplyUserColorGrading)
       // before Psycho-V: below 1, Psycho-V's own shadow curve goes negative toward black, and its
@@ -46,13 +53,6 @@ float4 main(float4 texcoord : TEXCOORD0) : COLOR {
         const float y = renodx::color::y::from::BT709(untonemapped) / 0.18f;
         const float y_shadowed = lerp(pow(y, 2.f - RENODX_TONE_MAP_SHADOWS), y, saturate(y));
         untonemapped *= renodx::math::DivideSafe(y_shadowed, y, 0.f);
-      }
-      // Peak in Game Brightness units. With Gamma Correction 2.2, RenderIntermediatePass maps sRGB-decoded
-      // values to 2.2-decoded ones, so the peak is pre-corrected the same way ToneMapPass does it.
-      // The add-on keeps it at 1 or more.
-      float peak = RENODX_PEAK_WHITE_NITS / RENODX_DIFFUSE_WHITE_NITS;
-      if (RENODX_GAMMA_CORRECTION > 0.f) {
-        peak = renodx::color::correct::Gamma(peak, true, 2.2f);
       }
       // The match values put Psycho-V on vanilla below white for this peak (the add-on computes
       // them); the Highlights slider applies on top, so 50 = vanilla. Above 50, Shadows runs from
@@ -74,12 +74,20 @@ float4 main(float4 texcoord : TEXCOORD0) : COLOR {
     // Hue Correction: vanilla's colour at the tone-mapped luminance, blended in by
     // strength, so highlights turn white the way vanilla's clipping showed them. Weighted by how far
     // the game's colour went past white (0 at white, 1 at twice white), as vanilla only clipped there.
+    // None does no tone mapping, so it keeps the untouched colour.
     const float clip_weight = saturate(max(composite.r, max(composite.g, composite.b)) - 1.f);
-    const float hue_correction = SCCT_HUE_CORRECTION * clip_weight;
+    const float hue_correction = (RENODX_TONE_MAP_TYPE == renodx::draw::TONE_MAP_TYPE_UNTONEMAPPED)
+                                     ? 0.f
+                                     : (SCCT_HUE_CORRECTION * clip_weight);
     [branch] if (hue_correction > 0.f) {
       const float color_y = renodx::color::y::from::BT709(color);
       const float vanilla_y = renodx::color::y::from::BT709(vanilla);
-      const float3 corrected = vanilla * renodx::math::DivideSafe(color_y, vanilla_y, 0.f);
+      float3 corrected = vanilla * renodx::math::DivideSafe(color_y, vanilla_y, 0.f);
+      // Matching a saturated clip to the tone-mapped luminance can lift its largest channel past
+      // Peak (orange (1, 0.5, 0.1) at 0.9 x Peak luminance: red at 1.55 x Peak). Scale it back to
+      // Peak, keeping its hue, so the roll-off the tone mapper set still holds.
+      const float corrected_max = max(corrected.r, max(corrected.g, corrected.b));
+      corrected *= min(1.f, renodx::math::DivideSafe(peak, corrected_max, 1.f));
       color = lerp(color, corrected, hue_correction);
     }
   }

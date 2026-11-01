@@ -51,6 +51,7 @@ float night_vision_hdr = 0.f;
 float emf_hdr = 0.f;
 
 constexpr float TONE_MAP_VANILLA = 0.f;
+constexpr float TONE_MAP_NONE = 1.f;
 constexpr float TONE_MAP_RENO_DRT = 3.f;
 
 constexpr float OUTPUT_MODE_SDR = 0.f;
@@ -72,6 +73,11 @@ renodx::utils::settings::Setting* gamma_correction_setting = nullptr;
 
 bool IsToneMapped() {
   return shader_injection.tone_map_type > TONE_MAP_VANILLA;
+}
+
+// Hue Correction: RenoDRT and PsychoV-30; None does no tone mapping and keeps its colour.
+bool UsesHueCorrection() {
+  return IsToneMapped() && shader_injection.tone_map_type != TONE_MAP_NONE;
 }
 
 bool IsHDR() {
@@ -179,7 +185,7 @@ renodx::utils::settings::Settings settings = {
                    "whiter. Only colours that went past white are shifted.\n"
                    "0% = keep the computed colour, 100% = vanilla hue.",
         .max = 100.f,
-        .is_enabled = &IsToneMapped,
+        .is_enabled = &UsesHueCorrection,
         .parse = [](float value) { return value * 0.01f; },
     },
     new renodx::utils::settings::Setting{
@@ -416,8 +422,14 @@ void UpdateOutput() {
     shader_injection.gamma_correction = 0.f;
   }
 
-  const PsychoMatch match = PsychoMatchFor(
-      shader_injection.peak_white_nits / (std::max)(shader_injection.diffuse_white_nits, 1.f));
+  // The match only depends on the peak the composite passes PsychoV-30. It was fitted at Gamma
+  // Correction 2.2, where that peak is pre-corrected (srgb::Decode(ratio^(1 / 2.2))); with sRGB it is
+  // the ratio itself, so look up the ratio whose pre-corrected peak equals it.
+  float match_ratio = shader_injection.peak_white_nits / (std::max)(shader_injection.diffuse_white_nits, 1.f);
+  if (shader_injection.gamma_correction == 0.f) {
+    match_ratio = std::pow(1.055f * std::pow(match_ratio, 1.f / 2.4f) - 0.055f, 2.2f);
+  }
+  const PsychoMatch match = PsychoMatchFor(match_ratio);
   shader_injection.psycho_shadows_match = match.shadows;
   shader_injection.psycho_highlights_match = match.highlights;
 }

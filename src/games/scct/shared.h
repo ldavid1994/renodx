@@ -94,6 +94,9 @@ cbuffer shader_injection : register(b13) {
 // keeps its defaults (scRGB, BT.709, no clamp or gamut compression).
 
 #define RENODX_RENO_DRT_TONE_MAP_METHOD renodx::tonemap::renodrt::config::tone_map_method::REINHARD
+// The composite applies the mod's Hue Correction after every tone mapper, so ToneMapPass's own (on by
+// default for RenoDRT) stays off: one correction, set by the slider.
+#define RENODX_TONE_MAP_HUE_CORRECTION 0.f
 
 #include "../../shaders/renodx.hlsl"
 
