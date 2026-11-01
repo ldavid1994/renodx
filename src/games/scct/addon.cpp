@@ -824,27 +824,19 @@ void OnDestroySwapchain(reshade::api::swapchain* swapchain, bool resize) {
 // present. Whatever the old device still holds stays leaked.
 // ---------------------------------------------------------------------------
 
-struct TrackedDevice {
-  reshade::api::device* device = nullptr;
-  IDirect3DDevice9* native = nullptr;
-};
-std::vector<TrackedDevice> live_d3d9_devices;
+std::vector<reshade::api::device*> live_d3d9_devices;
 
 void OnInitDevice(reshade::api::device* device) {
   if (device->get_api() != reshade::api::device_api::d3d9) return;
-  for (const auto& old_device : live_d3d9_devices) {
-    if (old_device.device == device) continue;
-    const bool proxy_bound = (renodx::utils::device_proxy::proxied_device_reshade == old_device.device);
-    if (proxy_bound) {
+  for (auto* old_device : live_d3d9_devices) {
+    if (old_device == device) continue;
+    if (renodx::utils::device_proxy::proxied_device_reshade == old_device) {
       reshade::log::message(reshade::log::level::warning, "[scct] old D3D9 device still alive: releasing the proxy from it");
-      renodx::utils::device_proxy::OnDestroyDevice(old_device.device);
+      renodx::utils::device_proxy::OnDestroyDevice(old_device);
     }
   }
-  std::erase_if(live_d3d9_devices, [device](const TrackedDevice& tracked) { return tracked.device != device; });
-  live_d3d9_devices.push_back({
-      .device = device,
-      .native = reinterpret_cast<IDirect3DDevice9*>(device->get_native()),
-  });
+  std::erase_if(live_d3d9_devices, [device](const reshade::api::device* tracked) { return tracked != device; });
+  live_d3d9_devices.push_back(device);
 }
 
 void OnDestroyDevice(reshade::api::device* device) {
@@ -859,7 +851,7 @@ void OnDestroyDevice(reshade::api::device* device) {
   if (emf_warp.device == reinterpret_cast<IDirect3DDevice9*>(device->get_native())) {
     ReleaseEmfWarp();
   }
-  std::erase_if(live_d3d9_devices, [device](const TrackedDevice& tracked) { return tracked.device == device; });
+  std::erase_if(live_d3d9_devices, [device](const reshade::api::device* tracked) { return tracked == device; });
 }
 
 // ---------------------------------------------------------------------------
