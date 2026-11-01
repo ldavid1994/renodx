@@ -9,30 +9,9 @@
  * display-mapped; the HUD draws onto the clone after it and the swap chain pass shows
  * it at UI Brightness. Copies to and from the back buffer are done on its clone (copy redirect),
  * so the vision passes read the real image.
- *
- * Development tools (SCCT_DEV_TOOLS):
- *
- *   F10        trace the next frame (render targets, clears, copies, resolves, draws, present)
- *              to ReShade.log as [scct-trace] lines
- *   F9 / F8    select the next / previous candidate draw and hide it (F8 below 0: probe off)
- *   F7         candidates: blended draws, every draw, or HUD draws only
- *
- * They also log every pixel and vertex shader once as [scct-shader] with its shader model, saved to
- * scct-dumps\0x<hash>.<ps|vs>_<major>_<minor>.cso in the game folder, report what keeps an old D3D9
- * device alive ([scct-leak]), and log the call stack if the add-on aborts ([scct-crash]).
  */
 
 #define ImTextureID ImU64
-
-// Development tools: trace, probe, shader dump, leak report and crash report. On in Debug builds,
-// off in Release and RelWithDebInfo (which define NDEBUG); pass -DSCCT_DEV_TOOLS=0/1 to override.
-#ifndef SCCT_DEV_TOOLS
-#ifdef NDEBUG
-#define SCCT_DEV_TOOLS 0
-#else
-#define SCCT_DEV_TOOLS 1
-#endif
-#endif
 
 #define RENODX_MODS_SWAPCHAIN_VERSION 2
 
@@ -53,15 +32,6 @@
 #include <string>
 #include <vector>
 
-#if SCCT_DEV_TOOLS
-#include <csignal>
-#include <cstdio>
-#include <cstring>
-#include <exception>
-#include <filesystem>
-#include <fstream>
-#include <unordered_map>
-#endif
 
 #include "../../mods/shader.hpp"
 #include "../../mods/swapchain.hpp"
@@ -477,408 +447,6 @@ void OnInitSwapchain(reshade::api::swapchain* swapchain, bool resize) {
 // The render target the game last bound, kept across presents, for the orphaned clone in OnPresent.
 reshade::api::resource_view last_render_target = {0u};
 
-#if SCCT_DEV_TOOLS
-
-// ---------------------------------------------------------------------------
-// Development tools: frame trace, draw probe and shader dump (see the file header).
-// ---------------------------------------------------------------------------
-
-struct BlendState {
-  bool enable = false;
-  uint32_t source_factor = static_cast<uint32_t>(reshade::api::blend_factor::one);
-  uint32_t dest_factor = static_cast<uint32_t>(reshade::api::blend_factor::zero);
-};
-
-BlendState blend_state;
-
-bool trace_active = false;
-bool trace_armed = false;
-uint64_t game_frame = 0;  // D3D9 presents
-uint32_t trace_draw_index = 0;
-
-// Shader hash -> "ps_<major>_<minor>" or "vs_<major>_<minor>", filled the first time a shader is drawn.
-std::unordered_map<uint32_t, std::string> shader_versions;
-
-int probe_target = -1;  // candidate to hide, -1 = probe off
-// Probe candidates (F7 cycles): blended draws, every draw, or HUD draws only (after the frame's
-// boundary draw: the composite or a vision pass's final draw).
-enum class ProbeMode : uint8_t {
-  BLENDED,
-  ALL,
-  HUD,
-};
-constexpr const char* PROBE_MODE_NAMES[] = {"blended draws", "all draws", "HUD draws"};
-ProbeMode probe_mode = ProbeMode::BLENDED;
-bool after_boundary = false;  // the boundary draw has run in this frame
-// The last scene draw of a frame, per view: the composite, or a vision pass's final draw.
-constexpr uint32_t BOUNDARY_SHADER_HASHES[] = {0x83A4F799u, 0x4ADA0B05u, 0xC294F957u, 0x7CE55E3Eu};
-int candidate_index = 0;
-int candidate_count = 0;  // last frame
-std::string probe_info;
-bool probe_found = false;
-int probe_logged_target = -1;
-ProbeMode probe_logged_mode = ProbeMode::BLENDED;
-
-void Log(const std::string& message) {
-  reshade::log::message(reshade::log::level::info, message.c_str());
-}
-
-std::string Describe(reshade::api::device* device, reshade::api::resource resource) {
-  std::stringstream s;
-  s << "0x" << std::hex << resource.handle << std::dec;
-  if (resource.handle == 0u) return s.str();
-  const auto desc = device->get_resource_desc(resource);
-  s << " " << desc.texture.width << "x" << desc.texture.height << " fmt=" << static_cast<uint32_t>(desc.texture.format);
-  renodx::utils::resource::GetResourceInfo(resource, [&](const renodx::utils::resource::ResourceInfo& info) {
-    if (info.is_swap_chain) {
-      s << " SWAPCHAIN";
-    }
-    if (info.clone.handle != 0u) {
-      s << " clone=0x" << std::hex << info.clone.handle << std::dec << (info.clone_enabled ? "(on)" : "(off)");
-    }
-  });
-  return s.str();
-}
-
-std::string DescribeView(reshade::api::device* device, reshade::api::resource_view view) {
-  if (view.handle == 0u) return "null";
-  std::string description = Describe(device, device->get_resource_from_view(view));
-  // A D3D9 render target view is a surface; name the texture it belongs to, if any.
-  if (device->get_api() == reshade::api::device_api::d3d9) {
-    auto* surface = reinterpret_cast<IDirect3DSurface9*>(view.handle);
-    IDirect3DTexture9* texture = nullptr;
-    if (SUCCEEDED(surface->GetContainer(__uuidof(IDirect3DTexture9), reinterpret_cast<void**>(&texture))) && texture != nullptr) {
-      std::stringstream s;
-      s << " surface-of=0x" << std::hex << reinterpret_cast<uintptr_t>(texture) << std::dec;
-      description += s.str();
-      texture->Release();
-    }
-  }
-  return description;
-}
-
-// Shader model of the bound pixel or vertex shader, read from its bytecode. The first time a hash is
-// seen, it is logged and its bytecode saved to scct-dumps for disassembly.
-std::string ShaderVersion(IDirect3DDevice9* native_device, reshade::api::pipeline_stage stage, uint32_t shader_hash) {
-  if (shader_hash == 0u) return "none";
-  if (auto it = shader_versions.find(shader_hash); it != shader_versions.end()) {
-    return it->second;
-  }
-  const bool is_vertex_shader = (stage == reshade::api::pipeline_stage::vertex_shader);
-  const char* prefix = (is_vertex_shader ? "vs" : "ps");
-  std::vector<uint8_t> bytecode;
-  const auto read_bytecode = [&](auto* shader) {
-    if (shader == nullptr) return;
-    UINT size = 0;
-    if (SUCCEEDED(shader->GetFunction(nullptr, &size)) && size >= sizeof(DWORD)) {
-      bytecode.resize(size);
-      if (FAILED(shader->GetFunction(bytecode.data(), &size))) {
-        bytecode.clear();
-      }
-    }
-    shader->Release();
-  };
-  if (is_vertex_shader) {
-    IDirect3DVertexShader9* vertex_shader = nullptr;
-    native_device->GetVertexShader(&vertex_shader);
-    read_bytecode(vertex_shader);
-  } else {
-    IDirect3DPixelShader9* pixel_shader = nullptr;
-    native_device->GetPixelShader(&pixel_shader);
-    read_bytecode(pixel_shader);
-  }
-  std::string version_name = std::string(prefix) + "_?";
-  if (!bytecode.empty()) {
-    DWORD version = 0;
-    std::memcpy(&version, bytecode.data(), sizeof(version));  // 0xFFFE0000 (vs) or 0xFFFF0000 (ps) | major << 8 | minor
-    const auto major = static_cast<unsigned>((version >> 8) & 0xFFu);
-    const auto minor = static_cast<unsigned>(version & 0xFFu);
-    version_name = std::string(prefix) + "_" + std::to_string(major) + "_" + std::to_string(minor);
-    char file_name[64];
-    std::snprintf(file_name, sizeof(file_name), "0x%08X.%s_%u_%u.cso", shader_hash, prefix, major, minor);
-    std::error_code error;
-    std::filesystem::create_directories("scct-dumps", error);
-    std::ofstream file(std::filesystem::path("scct-dumps") / file_name, std::ios::binary);
-    file.write(reinterpret_cast<const char*>(bytecode.data()), static_cast<std::streamsize>(bytecode.size()));
-    std::stringstream s;
-    s << "[scct-shader] " << prefix << "=0x" << std::hex << shader_hash << std::dec << " " << version_name
-      << " dumped scct-dumps\\" << file_name;
-    Log(s.str());
-  }
-  shader_versions.emplace(shader_hash, version_name);
-  return version_name;
-}
-
-void OnBindPipelineStates(reshade::api::command_list* cmd_list, uint32_t count,
-                          const reshade::api::dynamic_state* states, const uint32_t* values) {
-  for (uint32_t i = 0; i < count; ++i) {
-    switch (states[i]) {
-      case reshade::api::dynamic_state::blend_enable:
-        blend_state.enable = (values[i] != 0u);
-        break;
-      case reshade::api::dynamic_state::source_color_blend_factor:
-        blend_state.source_factor = values[i];
-        break;
-      case reshade::api::dynamic_state::dest_color_blend_factor:
-        blend_state.dest_factor = values[i];
-        break;
-      default:
-        break;
-    }
-  }
-}
-
-// Called before every draw. Returns true to hide it (probe selection).
-bool OnBeforeDraw(reshade::api::command_list* cmd_list, uint32_t count) {
-  auto* device = cmd_list->get_device();
-  if (device->get_api() != reshade::api::device_api::d3d9) return false;
-  auto* native_device = reinterpret_cast<IDirect3DDevice9*>(device->get_native());
-  const uint32_t pixel_shader_hash = renodx::utils::state::GetCurrentShaderHash(
-      cmd_list, reshade::api::pipeline_stage::pixel_shader);
-  const uint32_t vertex_shader_hash = renodx::utils::state::GetCurrentShaderHash(
-      cmd_list, reshade::api::pipeline_stage::vertex_shader);
-
-  auto describe_draw = [&]() {
-    std::stringstream s;
-    s << "ps=0x" << std::hex << pixel_shader_hash << std::dec << " " << ShaderVersion(native_device, reshade::api::pipeline_stage::pixel_shader, pixel_shader_hash)
-      << " vs=0x" << std::hex << vertex_shader_hash << std::dec << " " << ShaderVersion(native_device, reshade::api::pipeline_stage::vertex_shader, vertex_shader_hash)
-      << " count=" << count;
-    // Fixed-function vertices (no vertex shader) are described by the FVF code; shader input by the
-    // vertex declaration's usages (D3DDECLUSAGE: 0 position, 5 texcoord, 9 positiont, 10 color).
-    DWORD fvf = 0;
-    native_device->GetFVF(&fvf);
-    s << " fvf=0x" << std::hex << fvf << std::dec;
-    IDirect3DVertexDeclaration9* declaration = nullptr;
-    if (SUCCEEDED(native_device->GetVertexDeclaration(&declaration)) && declaration != nullptr) {
-      D3DVERTEXELEMENT9 elements[MAXD3DDECLLENGTH + 1] = {};
-      UINT element_count = 0;
-      if (SUCCEEDED(declaration->GetDeclaration(elements, &element_count))) {
-        s << " decl=";
-        for (UINT element = 0; element + 1 < element_count; ++element) {
-          s << static_cast<unsigned>(elements[element].Usage) << "." << static_cast<unsigned>(elements[element].UsageIndex)
-            << ":t" << static_cast<unsigned>(elements[element].Type) << "@" << elements[element].Offset << " ";
-        }
-      }
-      declaration->Release();
-    }
-    if (blend_state.enable) {
-      s << " blend=on src=" << blend_state.source_factor << " dst=" << blend_state.dest_factor;
-    } else {
-      s << " blend=off";
-    }
-    // The textures on stages 0-3: size and D3DFORMAT. A float format here (113 = A16B16G16R16F,
-    // 116 = A32B32G32R32F) is the game's HDR buffer being read, usually by the tonemapper.
-    for (DWORD stage = 0; stage < 4; ++stage) {
-      IDirect3DBaseTexture9* base_texture = nullptr;
-      if (FAILED(native_device->GetTexture(stage, &base_texture)) || base_texture == nullptr) continue;
-      if (base_texture->GetType() == D3DRTYPE_TEXTURE) {
-        D3DSURFACE_DESC desc = {};
-        if (SUCCEEDED(static_cast<IDirect3DTexture9*>(base_texture)->GetLevelDesc(0, &desc))) {
-          s << " tex" << stage << "=" << desc.Width << "x" << desc.Height << " d3dfmt" << stage << "="
-            << static_cast<uint32_t>(desc.Format) << (((desc.Usage & D3DUSAGE_RENDERTARGET) != 0u) ? " rt" : "");
-          // D3DTEXTUREFILTERTYPE: 1 point, 2 linear.
-          DWORD mag_filter = 0;
-          DWORD min_filter = 0;
-          native_device->GetSamplerState(stage, D3DSAMP_MAGFILTER, &mag_filter);
-          native_device->GetSamplerState(stage, D3DSAMP_MINFILTER, &min_filter);
-          s << " filter" << stage << "=" << mag_filter << "/" << min_filter;
-        }
-      } else {
-        s << " tex" << stage << "=type" << static_cast<uint32_t>(base_texture->GetType());
-      }
-      base_texture->Release();
-    }
-    return s.str();
-  };
-
-  if (trace_active) {
-    std::stringstream s;
-    s << "[scct-trace] draw " << trace_draw_index++ << " " << describe_draw();
-    // What porting a draw needs beyond its shaders: the nonzero constants (c0-c7 of the pixel shader,
-    // all ps_1_x has, and c0-c31 of the vertex shader) and the bump-environment matrices texbem reads.
-    float pixel_constants[4 * 8] = {};
-    float vertex_constants[4 * 32] = {};
-    native_device->GetPixelShaderConstantF(0, pixel_constants, 8);
-    native_device->GetVertexShaderConstantF(0, vertex_constants, 32);
-    auto append_constants = [&](const char* prefix, const float* constants, UINT register_count) {
-      for (UINT index = 0; index < register_count; ++index) {
-        const float* value = constants + (4 * index);
-        if (value[0] == 0.f && value[1] == 0.f && value[2] == 0.f && value[3] == 0.f) continue;
-        s << " " << prefix << index << "=" << value[0] << "," << value[1] << "," << value[2] << "," << value[3];
-      }
-    };
-    append_constants("psc", pixel_constants, 8);
-    append_constants("vsc", vertex_constants, 32);
-    for (DWORD stage = 0; stage < 4; ++stage) {
-      DWORD bump_matrix[4] = {};
-      native_device->GetTextureStageState(stage, D3DTSS_BUMPENVMAT00, &bump_matrix[0]);
-      native_device->GetTextureStageState(stage, D3DTSS_BUMPENVMAT01, &bump_matrix[1]);
-      native_device->GetTextureStageState(stage, D3DTSS_BUMPENVMAT10, &bump_matrix[2]);
-      native_device->GetTextureStageState(stage, D3DTSS_BUMPENVMAT11, &bump_matrix[3]);
-      if (bump_matrix[0] == 0u && bump_matrix[1] == 0u && bump_matrix[2] == 0u && bump_matrix[3] == 0u) continue;
-      s << " bumpenvmat" << stage << "=";
-      for (const DWORD entry : bump_matrix) {
-        s << std::bit_cast<float>(entry) << ",";
-      }
-      DWORD address_u = 0;
-      native_device->GetSamplerState(stage, D3DSAMP_ADDRESSU, &address_u);
-      s << " address" << stage << "=" << address_u;
-    }
-    Log(s.str());
-  } else {
-    // Logs and dumps shaders seen for the first time.
-    ShaderVersion(native_device, reshade::api::pipeline_stage::pixel_shader, pixel_shader_hash);
-    ShaderVersion(native_device, reshade::api::pipeline_stage::vertex_shader, vertex_shader_hash);
-  }
-
-  const bool is_hud_draw = after_boundary;
-  if (std::ranges::find(BOUNDARY_SHADER_HASHES, pixel_shader_hash) != std::end(BOUNDARY_SHADER_HASHES)) {
-    after_boundary = true;
-  }
-
-  if (probe_target < 0) return false;
-  if (probe_mode == ProbeMode::BLENDED && !blend_state.enable) return false;
-  if (probe_mode == ProbeMode::HUD && !is_hud_draw) return false;
-  const bool selected = (candidate_index == probe_target);
-  ++candidate_index;
-  if (!selected) return false;
-  probe_info = describe_draw();
-  probe_found = true;
-  return true;
-}
-
-bool OnDraw(reshade::api::command_list* cmd_list, uint32_t vertex_count, uint32_t instance_count, uint32_t first_vertex,
-            uint32_t first_instance) {
-  return OnBeforeDraw(cmd_list, vertex_count);
-}
-
-bool OnDrawIndexed(reshade::api::command_list* cmd_list, uint32_t index_count, uint32_t instance_count, uint32_t first_index,
-                   int32_t vertex_offset, uint32_t first_instance) {
-  return OnBeforeDraw(cmd_list, index_count);
-}
-
-bool OnClearRenderTarget(reshade::api::command_list* cmd_list, reshade::api::resource_view rtv,
-                         const float color[4], uint32_t rect_count, const reshade::api::rect* rects) {
-  if (trace_active) {
-    Log("[scct-trace] clear_rt " + DescribeView(cmd_list->get_device(), rtv));
-  }
-  return false;
-}
-
-bool OnResolve(reshade::api::command_list* cmd_list, reshade::api::resource source, uint32_t source_subresource,
-               const reshade::api::subresource_box* source_box, reshade::api::resource dest, uint32_t dest_subresource,
-               uint32_t dest_x, uint32_t dest_y, uint32_t dest_z, reshade::api::format format) {
-  if (trace_active) {
-    auto* device = cmd_list->get_device();
-    Log("[scct-trace] resolve " + Describe(device, source) + " -> " + Describe(device, dest));
-  }
-  return false;
-}
-
-// CPU writes (LockRect, UpdateSurface / UpdateTexture). Bink videos lock a screen-size dynamic
-// texture each frame. F10 doesn't reach ReShade while a video plays.
-void OnMapTextureRegion(reshade::api::device* device, reshade::api::resource resource, uint32_t subresource,
-                        const reshade::api::subresource_box* box, reshade::api::map_access access,
-                        reshade::api::subresource_data* data) {
-  if (trace_active) {
-    Log("[scct-trace] map " + Describe(device, resource) + " sub " + std::to_string(subresource) + " access "
-        + std::to_string(static_cast<int>(access)));
-  }
-}
-
-bool OnUpdateTextureRegion(reshade::api::device* device, const reshade::api::subresource_data& data,
-                           reshade::api::resource resource, uint32_t subresource, const reshade::api::subresource_box* box) {
-  if (trace_active) {
-    Log("[scct-trace] update " + Describe(device, resource) + " sub " + std::to_string(subresource));
-  }
-  return false;
-}
-
-void OnReshadePresent(reshade::api::effect_runtime* runtime) {
-  // With the proxy, both the game's D3D9 runtime and the DX11 one may get here, and only one of
-  // them may: handle the keys once per game frame, whichever runtime comes first.
-  static uint64_t keys_frame = ~0ull;
-  if (keys_frame == game_frame) return;
-  keys_frame = game_frame;
-  if (runtime->is_key_pressed(VK_F10) && !trace_active) {
-    trace_armed = true;
-    Log("[scct-trace] trace armed for next frame");
-  }
-  if (runtime->is_key_pressed(VK_F9)) {
-    probe_target = ((probe_target >= 0 && probe_target + 1 >= candidate_count) ? 0 : (probe_target + 1));
-  }
-  if (runtime->is_key_pressed(VK_F8) && probe_target >= 0) {
-    --probe_target;
-  }
-  if (runtime->is_key_pressed(VK_F7)) {
-    probe_mode = static_cast<ProbeMode>((static_cast<int>(probe_mode) + 1) % 3);
-    // Restart at the first candidate; -1 (probe off) stays off.
-    probe_target = (std::min)(probe_target, 0);
-  }
-}
-
-void OnOverlay(reshade::api::effect_runtime* runtime) {
-  if (probe_target < 0) return;
-  ImGui::SetNextWindowPos(ImVec2(20.f, 400.f), ImGuiCond_Always);
-  ImGui::SetNextWindowBgAlpha(0.75f);
-  constexpr ImGuiWindowFlags window_flags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize
-                                            | ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoSavedSettings
-                                            | ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav;
-  if (ImGui::Begin("scct probe", nullptr, window_flags)) {
-    ImGui::Text("Probe: draw %d of %d hidden (%s)", probe_target, candidate_count,
-                PROBE_MODE_NAMES[static_cast<int>(probe_mode)]);
-    ImGui::TextUnformatted(probe_info.c_str());
-    ImGui::TextUnformatted("F9 next   F8 previous / off   F7 blended / all / HUD");
-  }
-  ImGui::End();
-}
-
-// Crash report. The game sometimes ends with "This application has requested the Runtime to
-// terminate it in an unusual way" (abort or an uncaught C++ exception). Both handlers below belong
-// to this add-on's runtime library, so they only fire when the add-on's code is the one that
-// aborts; they write the exception and the call stack (module + offset) to ReShade.log first.
-void LogCallStack() {
-  void* frames[48] = {};
-  const USHORT count = CaptureStackBackTrace(1, 48, frames, nullptr);
-  for (USHORT i = 0; i < count; ++i) {
-    HMODULE module = nullptr;
-    char module_name[MAX_PATH] = "?";
-    if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                           static_cast<LPCSTR>(frames[i]), &module)
-            != FALSE
-        && module != nullptr) {
-      GetModuleFileNameA(module, module_name, MAX_PATH);
-    }
-    const auto offset = reinterpret_cast<uintptr_t>(frames[i]) - reinterpret_cast<uintptr_t>(module);
-    std::stringstream s;
-    s << "[scct-crash]   #" << i << " " << std::filesystem::path(module_name).filename().string()
-      << "+0x" << std::hex << offset;
-    reshade::log::message(reshade::log::level::error, s.str().c_str());
-  }
-}
-
-void OnTerminate() {
-  std::string what = "(no active exception)";
-  if (auto exception = std::current_exception()) {
-    try {
-      std::rethrow_exception(exception);
-    } catch (const std::exception& e) {
-      what = std::string("std::exception: ") + e.what();
-    } catch (...) {
-      what = "non-std exception";
-    }
-  }
-  reshade::log::message(reshade::log::level::error, ("[scct-crash] std::terminate: " + what).c_str());
-  LogCallStack();
-  std::abort();
-}
-
-void OnAbortSignal(int signal) {
-  reshade::log::message(reshade::log::level::error, "[scct-crash] abort() called");
-  LogCallStack();
-}
-
-#endif  // SCCT_DEV_TOOLS
 
 // ---------------------------------------------------------------------------
 // Night Vision HDR. Night vision is built from the composite's 8-bit copy and clamped at
@@ -1257,42 +825,6 @@ void OnInitDevice(reshade::api::device* device) {
   for (const auto& old_device : live_d3d9_devices) {
     if (old_device.device == device) continue;
     const bool proxy_bound = (renodx::utils::device_proxy::proxied_device_reshade == old_device.device);
-#if SCCT_DEV_TOOLS
-    // What is still alive on the old device. Only the device's refcount is peeked: a resource
-    // RenoDX still tracks may already be freed.
-    old_device.native->AddRef();
-    const ULONG native_refcount = old_device.native->Release();
-    std::stringstream s;
-    s << "[scct-leak] device 0x" << std::hex << reinterpret_cast<uintptr_t>(old_device.device) << std::dec
-      << " still alive, native refcount " << native_refcount << ", proxy bound to it: " << (proxy_bound ? "yes" : "no")
-      << ", proxy shared pairs: " << renodx::utils::device_proxy::proxy_shared_resources_by_clone.size();
-    Log(s.str());
-    int alive = 0;
-    renodx::utils::resource::ForEachResourceInfo([&](const renodx::utils::resource::ResourceInfo& info) {
-      if (info.device != old_device.device || info.destroyed) return;
-      if (++alive > 60) return;
-      std::stringstream r;
-      r << "[scct-leak]   0x" << std::hex << info.resource.handle << std::dec << " type=" << static_cast<uint32_t>(info.desc.type)
-        << " " << info.desc.texture.width << "x" << info.desc.texture.height << " fmt=" << static_cast<uint32_t>(info.desc.texture.format)
-        << " usage=0x" << std::hex << static_cast<uint32_t>(info.desc.usage) << " heap=" << static_cast<uint32_t>(info.desc.heap) << std::dec
-        << (info.is_clone ? " CLONE" : "") << (info.is_swap_chain ? " SWAPCHAIN" : "")
-        << (info.shared_handle != nullptr ? " SHARED" : "") << (info.upgraded ? " UPGRADED" : "");
-      if (info.clone.handle != 0u) {
-        r << " clone=0x" << std::hex << info.clone.handle << std::dec;
-      }
-      if (info.proxy_resource.handle != 0u) {
-        r << " proxy_resource=0x" << std::hex << info.proxy_resource.handle << std::dec;
-      }
-      Log(r.str());
-    });
-    Log("[scct-leak]   " + std::to_string(alive) + " tracked resources still alive on it");
-    for (const auto& [clone_handle, pair] : renodx::utils::device_proxy::proxy_shared_resources_by_clone) {
-      std::stringstream p;
-      p << "[scct-leak]   shared pair for clone 0x" << std::hex << clone_handle << ": host 0x"
-        << pair.host_shared_resource.handle << " proxy 0x" << pair.proxy_shared_resource.handle << std::dec;
-      Log(p.str());
-    }
-#endif
     if (proxy_bound) {
       reshade::log::message(reshade::log::level::warning, "[scct] old D3D9 device still alive: releasing the proxy from it");
       renodx::utils::device_proxy::OnDestroyDevice(old_device.device);
@@ -1402,12 +934,6 @@ bool Copy(reshade::api::command_list* cmd_list,
 bool OnCopyTextureRegion(reshade::api::command_list* cmd_list, reshade::api::resource source, uint32_t source_subresource,
                          const reshade::api::subresource_box* source_box, reshade::api::resource dest, uint32_t dest_subresource,
                          const reshade::api::subresource_box* dest_box, reshade::api::filter_mode filter) {
-#if SCCT_DEV_TOOLS
-  if (trace_active) {
-    auto* device = cmd_list->get_device();
-    Log("[scct-trace] copy " + Describe(device, source) + " -> " + Describe(device, dest));
-  }
-#endif
   D3DTEXTUREFILTERTYPE d3d_filter = D3DTEXF_NONE;
   switch (filter) {
     case reshade::api::filter_mode::min_mag_mip_point:
@@ -1424,12 +950,6 @@ bool OnCopyTextureRegion(reshade::api::command_list* cmd_list, reshade::api::res
 }
 
 bool OnCopyResource(reshade::api::command_list* cmd_list, reshade::api::resource source, reshade::api::resource dest) {
-#if SCCT_DEV_TOOLS
-  if (trace_active) {
-    auto* device = cmd_list->get_device();
-    Log("[scct-trace] copy " + Describe(device, source) + " -> " + Describe(device, dest));
-  }
-#endif
   return Copy(cmd_list, source, 0, nullptr, dest, 0, nullptr, D3DTEXF_NONE);
 }
 
@@ -1438,12 +958,6 @@ void OnBindRenderTargets(reshade::api::command_list* cmd_list, uint32_t count,
   if (count > 0 && cmd_list->get_device()->get_api() == reshade::api::device_api::d3d9) {
     last_render_target = rtvs[0];
   }
-#if SCCT_DEV_TOOLS
-  if (!trace_active) return;
-  for (uint32_t i = 0; i < count; ++i) {
-    Log("[scct-trace] bind_rt[" + std::to_string(i) + "] " + DescribeView(cmd_list->get_device(), rtvs[i]));
-  }
-#endif
 }
 
 void OnPresent(reshade::api::command_queue* queue, reshade::api::swapchain* swapchain, const reshade::api::rect* source_rect,
@@ -1509,37 +1023,6 @@ void OnPresent(reshade::api::command_queue* queue, reshade::api::swapchain* swap
     }
   }
 
-#if SCCT_DEV_TOOLS
-  ++game_frame;
-  // With every trace: whether the back buffer has its RGBA16F clone (the proxy sets it up at a
-  // present after the first, so the first present has none yet).
-  if (trace_armed) {
-    Log("[scct-trace] back buffer " + Describe(device, swapchain->get_current_back_buffer()));
-  }
-  if (trace_active) {
-    Log("[scct-trace] present (trace end)");
-    trace_active = false;
-  }
-  if (trace_armed) {
-    trace_armed = false;
-    trace_active = true;
-    trace_draw_index = 0;
-  }
-
-  candidate_count = candidate_index;
-  candidate_index = 0;
-  if (!probe_found) {
-    probe_info = "(no draw at this index this frame)";
-  }
-  probe_found = false;
-  after_boundary = false;
-  if (probe_target >= 0 && (probe_target != probe_logged_target || probe_mode != probe_logged_mode)) {
-    Log("[scct-probe] #" + std::to_string(probe_target) + " of " + std::to_string(candidate_count) + " ("
-        + PROBE_MODE_NAMES[static_cast<int>(probe_mode)] + ") " + probe_info);
-    probe_logged_target = probe_target;
-    probe_logged_mode = probe_mode;
-  }
-#endif
 }
 
 }  // namespace
@@ -1552,10 +1035,6 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved) {
     case DLL_PROCESS_ATTACH:
       if (!reshade::register_addon(h_module)) return FALSE;
 
-#if SCCT_DEV_TOOLS
-      std::set_terminate(OnTerminate);
-      std::signal(SIGABRT, OnAbortSignal);
-#endif
 
       renodx::mods::shader::force_pipeline_cloning = true;
       renodx::mods::shader::expected_constant_buffer_space = 50;
@@ -1612,30 +1091,8 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved) {
       reshade::register_event<reshade::addon_event::copy_texture_region>(OnCopyTextureRegion);
       reshade::register_event<reshade::addon_event::copy_resource>(OnCopyResource);
       reshade::register_event<reshade::addon_event::present>(OnPresent);
-#if SCCT_DEV_TOOLS
-      reshade::register_event<reshade::addon_event::bind_pipeline_states>(OnBindPipelineStates);
-      reshade::register_event<reshade::addon_event::draw>(OnDraw);
-      reshade::register_event<reshade::addon_event::draw_indexed>(OnDrawIndexed);
-      reshade::register_event<reshade::addon_event::clear_render_target_view>(OnClearRenderTarget);
-      reshade::register_event<reshade::addon_event::resolve_texture_region>(OnResolve);
-      reshade::register_event<reshade::addon_event::map_texture_region>(OnMapTextureRegion);
-      reshade::register_event<reshade::addon_event::update_texture_region>(OnUpdateTextureRegion);
-      reshade::register_event<reshade::addon_event::reshade_present>(OnReshadePresent);
-      reshade::register_event<reshade::addon_event::reshade_overlay>(OnOverlay);
-#endif
       break;
     case DLL_PROCESS_DETACH:
-#if SCCT_DEV_TOOLS
-      reshade::unregister_event<reshade::addon_event::reshade_overlay>(OnOverlay);
-      reshade::unregister_event<reshade::addon_event::reshade_present>(OnReshadePresent);
-      reshade::unregister_event<reshade::addon_event::update_texture_region>(OnUpdateTextureRegion);
-      reshade::unregister_event<reshade::addon_event::map_texture_region>(OnMapTextureRegion);
-      reshade::unregister_event<reshade::addon_event::resolve_texture_region>(OnResolve);
-      reshade::unregister_event<reshade::addon_event::clear_render_target_view>(OnClearRenderTarget);
-      reshade::unregister_event<reshade::addon_event::draw_indexed>(OnDrawIndexed);
-      reshade::unregister_event<reshade::addon_event::draw>(OnDraw);
-      reshade::unregister_event<reshade::addon_event::bind_pipeline_states>(OnBindPipelineStates);
-#endif
       reshade::unregister_event<reshade::addon_event::present>(OnPresent);
       reshade::unregister_event<reshade::addon_event::copy_resource>(OnCopyResource);
       reshade::unregister_event<reshade::addon_event::copy_texture_region>(OnCopyTextureRegion);
