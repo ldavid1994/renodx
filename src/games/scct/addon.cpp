@@ -592,8 +592,9 @@ void OnNightVisionImageDrawn(reshade::api::command_list* cmd_list) {
 // (0xCDFC48BC), so it clips at white. With the toggle on, the draw that shows it (0x7CE55E3E,
 // texbem) runs with emf_hdr_pixel_shader and emf_vertex_shader instead, which sum the levels again
 // without the clip and add what went past white. The levels are the textures the sum drew from,
-// kept until the next present without a reference: a D3D9 reset, which needs them released, only
-// comes after one. The game's shaders, c8-c10 and stages 4-7 are put back once it has drawn.
+// held with a reference until the next present (or a swap chain or device teardown), so a level the
+// game recreates in between is never bound freed. The game's shaders, c8-c10 and stages 4-7 are put
+// back once it has drawn.
 // ---------------------------------------------------------------------------
 
 // c8: stage 3's bump-environment matrix, c9.x: Peak over Game Brightness, c10: the levels' sizes.
@@ -624,14 +625,22 @@ struct EmfSavedState {
 };
 EmfSavedState emf_saved_state;
 
+void ReleaseEmfLevels() {
+  for (auto*& level : emf_levels) {
+    if (level != nullptr) {
+      level->Release();
+      level = nullptr;
+    }
+  }
+}
+
 bool OnEmfLevelsSumDraw(reshade::api::command_list* cmd_list) {
   if (emf_hdr == 0.f || !IsHDR()) return true;
   auto* native_device = reinterpret_cast<IDirect3DDevice9*>(cmd_list->get_device()->get_native());
+  ReleaseEmfLevels();
   for (DWORD level = 0; level < EMF_LEVEL_COUNT; ++level) {
-    emf_levels[level] = nullptr;
-    if (SUCCEEDED(native_device->GetTexture(level, &emf_levels[level])) && emf_levels[level] != nullptr) {
-      emf_levels[level]->Release();
-    }
+    // On failure D3D9 leaves the slot null, which OnEmfImageDraw checks.
+    native_device->GetTexture(level, &emf_levels[level]);
   }
   return true;
 }
@@ -815,6 +824,7 @@ void OnEmfWarpDrawn(reshade::api::command_list* cmd_list) {
 
 void OnDestroySwapchain(reshade::api::swapchain* swapchain, bool resize) {
   if (swapchain->get_device()->get_api() != reshade::api::device_api::d3d9) return;
+  ReleaseEmfLevels();
   ReleaseEmfWarpCopy();
 }
 
@@ -852,6 +862,7 @@ void OnInitDevice(reshade::api::device* device) {
 void OnDestroyDevice(reshade::api::device* device) {
   if (device->get_api() != reshade::api::device_api::d3d9) return;
   last_render_target = {0u};
+  ReleaseEmfLevels();
   for (auto* shaders : {&night_vision_shaders, &emf_shaders}) {
     if (shaders->device == reinterpret_cast<IDirect3DDevice9*>(device->get_native())) {
       ReleaseVisionShaders(shaders);
@@ -990,7 +1001,7 @@ void OnPresent(reshade::api::command_queue* queue, reshade::api::swapchain* swap
     return;
   }
 
-  std::ranges::fill(emf_levels, nullptr);
+  ReleaseEmfLevels();
   emf_image_drawn = false;
   UpdateOutput();
 
