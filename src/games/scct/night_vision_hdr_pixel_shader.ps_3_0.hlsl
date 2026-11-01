@@ -8,6 +8,8 @@
 // surface detail the game's white hides; the light is in the image's own colour at white, rather
 // than the tint, which keeps the near-white hue night vision clips to.
 
+#include "./shared.h"
+
 sampler2D brightness_0 : register(s0);
 sampler2D brightness_1 : register(s1);
 sampler2D brightness_2 : register(s2);
@@ -16,8 +18,6 @@ sampler2D brightness_3 : register(s3);
 float4 tint_brightness : register(c0);
 float4 tint_extra : register(c1);
 float4 tint_boost : register(c2);
-float4 glow_sizes : register(c8);  // in texels, xy: s1, zw: s2
-float4 peak_ratio : register(c9);  // x: Peak over Game Brightness
 
 // The image is gamma-encoded; the excess and its limit are worked out in linear light.
 static const float GAMMA = 2.2f;
@@ -67,8 +67,8 @@ float4 main(float2 texcoord_0 : TEXCOORD0, float2 texcoord_1 : TEXCOORD1,
   color = clamp(tex2D(brightness_3, texcoord_3).a * c1 + color, -1.f, 1.f);
   color = saturate((color * c2 + color) * 2.f);
 
-  const float smooth_glow_brightness = CubicSample(brightness_1, texcoord_1, glow_sizes.xy)
-                                       + CubicSample(brightness_2, texcoord_2, glow_sizes.zw);
+  const float smooth_glow_brightness = CubicSample(brightness_1, texcoord_1, CUSTOM_NIGHT_VISION_GLOW_SIZES.xy)
+                                       + CubicSample(brightness_2, texcoord_2, CUSTOM_NIGHT_VISION_GLOW_SIZES.zw);
   const float3 glow = GLOW_STRENGTH * smooth_glow_brightness * c0.rgb * 2.f * (1.f + c2.rgb);
   const float glow_peak = max(0.f, max(glow.r, max(glow.g, glow.b)));
   const float past_white = pow(glow_peak, GAMMA) - 1.f;
@@ -78,7 +78,7 @@ float4 main(float2 texcoord_0 : TEXCOORD0, float2 texcoord_1 : TEXCOORD1,
   }
   // At most what Peak leaves above white (linear): x / (1 + x / limit) approaches it without
   // reaching it, so the glow rolls off toward Peak instead of clipping flat there.
-  const float limit = max(1e-3f, peak_ratio.x - 1.f);
+  const float limit = max(1e-3f, CUSTOM_VISION_PEAK_RATIO - 1.f);
   const float image_peak = max(color.r, max(color.g, color.b));
   const float added = excess / (1.f + excess / limit) * smoothstep(LAYER_FROM, 1.f, image_peak);
   const float3 image_white = pow(color.rgb / max(image_peak, 1e-4f), GAMMA);

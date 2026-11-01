@@ -28,7 +28,7 @@ float4 main(float4 texcoord : TEXCOORD0) : COLOR {
   }
   // Gamma-encoded, like everything the game draws: it was shown on the display as written.
   // Bloom: 1 = vanilla.
-  const float3 composite = scene + bloom_color * SCCT_BLOOM;
+  const float3 composite = scene + bloom_color * CUSTOM_BLOOM;
   // What vanilla showed: the sum clipped at white by the 8-bit back buffer.
   const float3 vanilla = renodx::color::srgb::Decode(saturate(composite));
 
@@ -45,7 +45,7 @@ float4 main(float4 texcoord : TEXCOORD0) : COLOR {
     if (RENODX_GAMMA_CORRECTION > 0.f) {
       peak = renodx::color::correct::Gamma(peak, true, 2.2f);
     }
-    [branch] if (RENODX_TONE_MAP_TYPE == SCCT_TONE_MAP_TYPE_PSYCHO_V) {
+    [branch] if (RENODX_TONE_MAP_TYPE == CUSTOM_TONE_MAP_TYPE_PSYCHO_V) {
       // Shadows below 50 darken with RenoDRT's curve (renodx::color::grade::ApplyUserColorGrading)
       // before Psycho-V: below 1, Psycho-V's own shadow curve goes negative toward black, and its
       // sign handling folds those pixels back up into blotches.
@@ -56,14 +56,14 @@ float4 main(float4 texcoord : TEXCOORD0) : COLOR {
       }
       // The match values put Psycho-V on vanilla below white for this peak (the add-on computes
       // them); the Highlights slider applies on top, so 50 = vanilla. Above 50, Shadows runs from
-      // the match to SCCT_SHADOWS_MAX, as RenoDRT's does from 1: at 2 Psycho-V's shadow curve is a
+      // the match to CUSTOM_SHADOWS_MAX, as RenoDRT's does from 1: at 2 Psycho-V's shadow curve is a
       // flat floor under everything above black, and past 2 it goes to infinity toward black.
       color = renodx::tonemap::psychov::psychotm_test30(
           untonemapped, peak,
           RENODX_TONE_MAP_EXPOSURE,
-          RENODX_TONE_MAP_HIGHLIGHTS * SCCT_PSYCHO_HIGHLIGHTS_MATCH,
-          lerp(SCCT_PSYCHO_SHADOWS_MATCH, SCCT_SHADOWS_MAX,
-               saturate((RENODX_TONE_MAP_SHADOWS - 1.f) / (SCCT_SHADOWS_MAX - 1.f))),
+          RENODX_TONE_MAP_HIGHLIGHTS * CUSTOM_PSYCHO_HIGHLIGHTS_MATCH,
+          lerp(CUSTOM_PSYCHO_SHADOWS_MATCH, CUSTOM_SHADOWS_MAX,
+               saturate((RENODX_TONE_MAP_SHADOWS - 1.f) / (CUSTOM_SHADOWS_MAX - 1.f))),
           RENODX_TONE_MAP_CONTRAST,
           RENODX_TONE_MAP_SATURATION);
     }
@@ -78,7 +78,7 @@ float4 main(float4 texcoord : TEXCOORD0) : COLOR {
     const float clip_weight = saturate(max(composite.r, max(composite.g, composite.b)) - 1.f);
     const float hue_correction = (RENODX_TONE_MAP_TYPE == renodx::draw::TONE_MAP_TYPE_UNTONEMAPPED)
                                      ? 0.f
-                                     : (SCCT_HUE_CORRECTION * clip_weight);
+                                     : (CUSTOM_HUE_CORRECTION * clip_weight);
     [branch] if (hue_correction > 0.f) {
       const float color_y = renodx::color::y::from::BT709(color);
       const float vanilla_y = renodx::color::y::from::BT709(vanilla);

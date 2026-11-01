@@ -8,11 +8,11 @@
 // constants, so the injection lives in c50-c53 (constant_buffer_offset = 50 * 4 in addon.cpp).
 // Tone Mapper values: Vanilla 0, None 1 and RenoDRT 3 are the framework's types; Psycho-V is this
 // mod's own.
-#define SCCT_TONE_MAP_TYPE_PSYCHO_V 4.f
+#define CUSTOM_TONE_MAP_TYPE_PSYCHO_V 4.f
 // Shadows at 100. Both tone mappers lift dark values by adding c * x^(2 - shadows); at 2 that is a
 // flat floor under everything above black (blotches, near-black colours blown up), so the slider
 // stops at 1.75.
-#define SCCT_SHADOWS_MAX 1.75f
+#define CUSTOM_SHADOWS_MAX 1.75f
 
 struct ShaderInjectData {
   float peak_white_nits;
@@ -49,16 +49,25 @@ float4 shader_injection[4] : register(c50);
 #define RENODX_GRAPHICS_WHITE_NITS      shader_injection[0][2]
 #define RENODX_TONE_MAP_TYPE            shader_injection[0][3]
 #define RENODX_GAMMA_CORRECTION         shader_injection[1][0]
-#define SCCT_HUE_CORRECTION             shader_injection[1][1]
+#define CUSTOM_HUE_CORRECTION           shader_injection[1][1]
 #define RENODX_TONE_MAP_SATURATION      shader_injection[1][2]
-#define SCCT_BLOOM                      shader_injection[1][3]
+#define CUSTOM_BLOOM                    shader_injection[1][3]
 #define RENODX_TONE_MAP_EXPOSURE        shader_injection[2][0]
 #define RENODX_TONE_MAP_HIGHLIGHTS      shader_injection[2][1]
 #define RENODX_TONE_MAP_SHADOWS         shader_injection[2][2]
 #define RENODX_TONE_MAP_CONTRAST        shader_injection[2][3]
-#define SCCT_PSYCHO_SHADOWS_MATCH       shader_injection[3][0]
-#define SCCT_PSYCHO_HIGHLIGHTS_MATCH    shader_injection[3][1]
+#define CUSTOM_PSYCHO_SHADOWS_MATCH     shader_injection[3][0]
+#define CUSTOM_PSYCHO_HIGHLIGHTS_MATCH  shader_injection[3][1]
 #define RENODX_SWAP_CHAIN_OUTPUT_PRESET shader_injection[3][2]
+
+// Night Vision HDR and EMF HDR: the add-on's constants for their ps_3_0, after the game's own
+// (c0-c3), set for those draws only.
+float4 vision_settings[3] : register(c8);
+
+#define CUSTOM_NIGHT_VISION_GLOW_SIZES vision_settings[0]    // in texels, xy: s1, zw: s2
+#define CUSTOM_EMF_BUMP_MATRIX         vision_settings[0]    // BUMPENVMAT00, 01, 10, 11 of stage 3
+#define CUSTOM_VISION_PEAK_RATIO       vision_settings[1].x  // Peak over Game Brightness
+#define CUSTOM_EMF_LEVEL_SIZES         vision_settings[2]    // in texels, per level (square)
 
 #else
 
@@ -77,15 +86,15 @@ cbuffer shader_injection : register(b13) {
 #define RENODX_GRAPHICS_WHITE_NITS      shader_injection.graphics_white_nits
 #define RENODX_TONE_MAP_TYPE            shader_injection.tone_map_type
 #define RENODX_GAMMA_CORRECTION         shader_injection.gamma_correction
-#define SCCT_HUE_CORRECTION             shader_injection.hue_correction
+#define CUSTOM_HUE_CORRECTION           shader_injection.hue_correction
 #define RENODX_TONE_MAP_SATURATION      shader_injection.saturation
-#define SCCT_BLOOM                      shader_injection.bloom
+#define CUSTOM_BLOOM                    shader_injection.bloom
 #define RENODX_TONE_MAP_EXPOSURE        shader_injection.tone_map_exposure
 #define RENODX_TONE_MAP_HIGHLIGHTS      shader_injection.tone_map_highlights
 #define RENODX_TONE_MAP_SHADOWS         shader_injection.tone_map_shadows
 #define RENODX_TONE_MAP_CONTRAST        shader_injection.tone_map_contrast
-#define SCCT_PSYCHO_SHADOWS_MATCH       shader_injection.psycho_shadows_match
-#define SCCT_PSYCHO_HIGHLIGHTS_MATCH    shader_injection.psycho_highlights_match
+#define CUSTOM_PSYCHO_SHADOWS_MATCH     shader_injection.psycho_shadows_match
+#define CUSTOM_PSYCHO_HIGHLIGHTS_MATCH  shader_injection.psycho_highlights_match
 #define RENODX_SWAP_CHAIN_OUTPUT_PRESET shader_injection.swap_chain_output_preset
 
 #endif

@@ -7,6 +7,8 @@
 // white, soft-limited toward Peak. Smoothed because past white the finer levels' surface detail
 // shows as blotches the clip used to hide.
 
+#include "./shared.h"
+
 sampler2D wobble : register(s0);
 sampler2D image : register(s3);
 sampler2D level_0 : register(s4);
@@ -15,9 +17,6 @@ sampler2D level_2 : register(s6);
 sampler2D level_3 : register(s7);
 
 float4 level_weights[4] : register(c0);  // the game's, still set from its sum of the levels
-float4 bump_matrix : register(c8);       // BUMPENVMAT00, 01, 10, 11 of stage 3
-float4 peak_ratio : register(c9);        // x: Peak over Game Brightness
-float4 level_sizes : register(c10);      // in texels, per level (square); the shader uses z and w
 
 // The image is gamma-encoded; the excess and its limit are worked out in linear light.
 static const float GAMMA = 2.2f;
@@ -53,7 +52,7 @@ float3 CubicSample(sampler2D level, float2 texcoord, float size) {
 float4 main(float2 texcoord_0 : TEXCOORD0, float2 texcoord_3 : TEXCOORD3, float2 pixel_position : VPOS) : COLOR {
   // texbem: u += M00 * du + M10 * dv, v += M01 * du + M11 * dv.
   const float2 offset = tex2D(wobble, texcoord_0).rg;
-  const float2 texcoord = texcoord_3 + offset.x * bump_matrix.xy + offset.y * bump_matrix.zw;
+  const float2 texcoord = texcoord_3 + offset.x * CUSTOM_EMF_BUMP_MATRIX.xy + offset.y * CUSTOM_EMF_BUMP_MATRIX.zw;
   float4 color = saturate(tex2D(image, texcoord));
 
   // The finer levels carry the detail of the glowing surfaces, which past white shows as a cloudy
@@ -62,12 +61,12 @@ float4 main(float2 texcoord_0 : TEXCOORD0, float2 texcoord_3 : TEXCOORD3, float2
   float3 fine_sum = 0.f;
   [unroll] for (int y = 0; y < 4; ++y) {
     [unroll] for (int x = 0; x < 4; ++x) {
-      const float2 tap = texcoord + (float2(x, y) - 1.5f) / level_sizes.z;
+      const float2 tap = texcoord + (float2(x, y) - 1.5f) / CUSTOM_EMF_LEVEL_SIZES.z;
       const float weight = SMOOTHING_WEIGHTS[x] * SMOOTHING_WEIGHTS[y];
       fine_sum += weight * (tex2D(level_0, tap).rgb * level_weights[0].rgb + tex2D(level_1, tap).rgb * level_weights[1].rgb + tex2D(level_2, tap).rgb * level_weights[2].rgb);
     }
   }
-  const float3 levels_sum = fine_sum + CubicSample(level_3, texcoord, level_sizes.w) * level_weights[3].rgb;
+  const float3 levels_sum = fine_sum + CubicSample(level_3, texcoord, CUSTOM_EMF_LEVEL_SIZES.w) * level_weights[3].rgb;
   const float sum_peak = max(0.f, max(levels_sum.r, max(levels_sum.g, levels_sum.b)));
   const float past_white = pow(sum_peak, GAMMA) - 1.f;
   float excess = max(0.f, past_white);
@@ -76,7 +75,7 @@ float4 main(float2 texcoord_0 : TEXCOORD0, float2 texcoord_3 : TEXCOORD3, float2
   }
   // At most what Peak leaves above white (linear): x / (1 + x / limit) approaches it without
   // reaching it, so the excess rolls off toward Peak instead of clipping flat there.
-  const float limit = max(1e-3f, peak_ratio.x - 1.f);
+  const float limit = max(1e-3f, CUSTOM_VISION_PEAK_RATIO - 1.f);
   const float image_peak = max(color.r, max(color.g, color.b));
   // In the image's own colour at white, which keeps the hue the game clips to.
   const float added = excess / (1.f + excess / limit) * saturate(image_peak * 2.f - 1.f);

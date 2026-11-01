@@ -32,7 +32,6 @@
 #include <string>
 #include <vector>
 
-
 #include "../../mods/shader.hpp"
 #include "../../mods/swapchain.hpp"
 #include "../../utils/date.hpp"
@@ -128,7 +127,7 @@ renodx::utils::settings::Settings settings = {
         .labels = {"Vanilla", "None", "RenoDRT", "PsychoV-30"},
         .is_enabled = &IsHDR,
         .parse = [](float value) {
-          if (value >= 3.f) return SCCT_TONE_MAP_TYPE_PSYCHO_V;
+          if (value >= 3.f) return CUSTOM_TONE_MAP_TYPE_PSYCHO_V;
           if (value >= 2.f) return TONE_MAP_RENO_DRT;
           return value;
         },
@@ -219,10 +218,10 @@ renodx::utils::settings::Settings settings = {
         .tooltip = "Brightness of the dark parts of the scene. 50 = vanilla.",
         .max = 100.f,
         .is_enabled = &IsToneMapped,
-        // 0 = 0, 50 = 1, 100 = SCCT_SHADOWS_MAX instead of 2 (see shared.h).
+        // 0 = 0, 50 = 1, 100 = CUSTOM_SHADOWS_MAX instead of 2 (see shared.h).
         .parse = [](float value) {
           if (value <= 50.f) return value * 0.02f;
-          return std::lerp(1.f, SCCT_SHADOWS_MAX, (value - 50.f) * 0.02f);
+          return std::lerp(1.f, CUSTOM_SHADOWS_MAX, (value - 50.f) * 0.02f);
         },
     },
     new renodx::utils::settings::Setting{
@@ -378,24 +377,6 @@ constexpr PsychoMatch PSYCHO_MATCH[] = {
     {.ratio = 50.f, .shadows = 1.0531f, .highlights = 1.0036f},
 };
 
-PsychoMatch PsychoMatchFor(float ratio) {
-  const auto* first = std::begin(PSYCHO_MATCH);
-  const auto* last = std::end(PSYCHO_MATCH) - 1;
-  if (ratio <= first->ratio) return *first;
-  if (ratio >= last->ratio) return *last;
-  const auto* upper = first + 1;
-  while (upper->ratio < ratio) {
-    ++upper;
-  }
-  const auto* lower = upper - 1;
-  const float t = std::log(ratio / lower->ratio) / std::log(upper->ratio / lower->ratio);
-  return {
-      .ratio = ratio,
-      .shadows = std::lerp(lower->shadows, upper->shadows, t),
-      .highlights = std::lerp(lower->highlights, upper->highlights, t),
-  };
-}
-
 // Writes what the shaders read from Output Mode, on the HDR Format chosen at startup, and the
 // Psycho-V match for the resulting Peak / Game Brightness. Run every game frame, so slider changes,
 // presets and Reset all reach the shaders through it.
@@ -429,9 +410,17 @@ void UpdateOutput() {
   if (shader_injection.gamma_correction == 0.f) {
     match_ratio = std::pow(1.055f * std::pow(match_ratio, 1.f / 2.4f) - 0.055f, 2.2f);
   }
-  const PsychoMatch match = PsychoMatchFor(match_ratio);
-  shader_injection.psycho_shadows_match = match.shadows;
-  shader_injection.psycho_highlights_match = match.highlights;
+  const auto* first = std::begin(PSYCHO_MATCH);
+  const auto* last = std::end(PSYCHO_MATCH) - 1;
+  match_ratio = std::clamp(match_ratio, first->ratio, last->ratio);
+  const auto* upper = first + 1;
+  while (upper != last && upper->ratio < match_ratio) {
+    ++upper;
+  }
+  const auto* lower = upper - 1;
+  const float t = std::log(match_ratio / lower->ratio) / std::log(upper->ratio / lower->ratio);
+  shader_injection.psycho_shadows_match = std::lerp(lower->shadows, upper->shadows, t);
+  shader_injection.psycho_highlights_match = std::lerp(lower->highlights, upper->highlights, t);
 }
 
 // The proxy's DXGI swap chain and the colour space last set on it, kept on Output Mode in OnPresent.
@@ -458,7 +447,6 @@ void OnInitSwapchain(reshade::api::swapchain* swapchain, bool resize) {
 
 // The render target the game last bound, kept across presents, for the orphaned clone in OnPresent.
 reshade::api::resource_view last_render_target = {0u};
-
 
 // ---------------------------------------------------------------------------
 // Night Vision HDR. Night vision is built from the composite's 8-bit copy and clamped at
@@ -1045,7 +1033,6 @@ void OnPresent(reshade::api::command_queue* queue, reshade::api::swapchain* swap
       }
     }
   }
-
 }
 
 }  // namespace
@@ -1057,7 +1044,6 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved) {
   switch (fdw_reason) {
     case DLL_PROCESS_ATTACH:
       if (!reshade::register_addon(h_module)) return FALSE;
-
 
       renodx::mods::shader::force_pipeline_cloning = true;
       renodx::mods::shader::expected_constant_buffer_space = 50;
