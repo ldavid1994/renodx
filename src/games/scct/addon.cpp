@@ -408,7 +408,7 @@ void UpdateOutput() {
   // the ratio itself, so look up the ratio whose pre-corrected peak equals it.
   float match_ratio = shader_injection.peak_white_nits / (std::max)(shader_injection.diffuse_white_nits, 1.f);
   if (shader_injection.gamma_correction == 0.f) {
-    match_ratio = std::pow(1.055f * std::pow(match_ratio, 1.f / 2.4f) - 0.055f, 2.2f);
+    match_ratio = std::pow((1.055f * std::pow(match_ratio, 1.f / 2.4f)) - 0.055f, 2.2f);
   }
   const auto* first = std::begin(PSYCHO_MATCH);
   const auto* last = std::end(PSYCHO_MATCH) - 1;
@@ -619,6 +619,9 @@ constexpr D3DSAMPLERSTATETYPE EMF_LEVEL_SAMPLER_STATES[] = {D3DSAMP_MAGFILTER, D
                                                             D3DSAMP_ADDRESSV};
 // Bilinear, for the shader's cubic upsampling, and clamped, as the game samples them.
 constexpr DWORD EMF_LEVEL_SAMPLER_VALUES[] = {D3DTEXF_LINEAR, D3DTEXF_LINEAR, D3DTADDRESS_CLAMP, D3DTADDRESS_CLAMP};
+// texbem's bump-environment matrix, which the shader gets from stage 3 as a constant.
+constexpr D3DTEXTURESTAGESTATETYPE EMF_BUMP_MATRIX_STATES[] = {D3DTSS_BUMPENVMAT00, D3DTSS_BUMPENVMAT01,
+                                                               D3DTSS_BUMPENVMAT10, D3DTSS_BUMPENVMAT11};
 
 IDirect3DBaseTexture9* emf_levels[EMF_LEVEL_COUNT] = {};
 bool emf_image_drawn = false;  // EMF HDR has drawn this frame's image
@@ -654,11 +657,9 @@ bool OnEmfImageDraw(reshade::api::command_list* cmd_list) {
   EmfConstants constants = {
       .peak_ratio = shader_injection.peak_white_nits / (std::max)(shader_injection.diffuse_white_nits, 1.f),
   };
-  constexpr D3DTEXTURESTAGESTATETYPE BUMP_MATRIX_STATES[] = {D3DTSS_BUMPENVMAT00, D3DTSS_BUMPENVMAT01,
-                                                             D3DTSS_BUMPENVMAT10, D3DTSS_BUMPENVMAT11};
-  for (size_t index = 0; index < std::size(BUMP_MATRIX_STATES); ++index) {
+  for (size_t index = 0; index < std::size(EMF_BUMP_MATRIX_STATES); ++index) {
     DWORD entry = 0;
-    native_device->GetTextureStageState(3, BUMP_MATRIX_STATES[index], &entry);
+    native_device->GetTextureStageState(3, EMF_BUMP_MATRIX_STATES[index], &entry);
     constants.bump_matrix[index] = std::bit_cast<float>(entry);
   }
   for (DWORD level = 0; level < EMF_LEVEL_COUNT; ++level) {
