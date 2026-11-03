@@ -74,9 +74,14 @@ bool IsToneMapped() {
   return shader_injection.tone_map_type > TONE_MAP_VANILLA;
 }
 
-// Hue Correction: RenoDRT and PsychoV-30; None does no tone mapping and keeps its colour.
-bool UsesHueCorrection() {
+// Hue Clip: RenoDRT and PsychoV-30; None does no tone mapping and keeps its colour.
+bool UsesHueClip() {
   return IsToneMapped() && shader_injection.tone_map_type != TONE_MAP_NONE;
+}
+
+// Hue Correction and Hue Shift are draw.hlsl's, which ToneMapPass applies for RenoDRT only.
+bool IsRenoDRT() {
+  return shader_injection.tone_map_type == TONE_MAP_RENO_DRT;
 }
 
 bool IsHDR() {
@@ -175,16 +180,24 @@ renodx::utils::settings::Settings settings = {
     },
     new renodx::utils::settings::Setting{
         .key = "ToneMapHueCorrection",
-        .binding = &shader_injection.hue_correction,
+        .binding = &shader_injection.tone_map_hue_correction,
         .default_value = 100.f,
         .label = "Hue Correction",
         .section = "Tone Mapping",
-        .tooltip = "Shifts HDR highlights toward the hue vanilla showed.\n"
-                   "Vanilla clipped each colour channel at white, so bright lamps and lights turned\n"
-                   "whiter. Only colours that went past white are shifted.\n"
-                   "0% = keep the computed colour, 100% = vanilla hue.",
+        .tooltip = "Hue retention strength.",
         .max = 100.f,
-        .is_enabled = &UsesHueCorrection,
+        .is_enabled = &IsRenoDRT,
+        .parse = [](float value) { return value * 0.01f; },
+    },
+    new renodx::utils::settings::Setting{
+        .key = "ToneMapHueShift",
+        .binding = &shader_injection.tone_map_hue_shift,
+        .default_value = 0.f,
+        .label = "Hue Shift",
+        .section = "Tone Mapping",
+        .tooltip = "Hue-shift emulation strength.",
+        .max = 100.f,
+        .is_enabled = &IsRenoDRT,
         .parse = [](float value) { return value * 0.01f; },
     },
     new renodx::utils::settings::Setting{
@@ -257,6 +270,20 @@ renodx::utils::settings::Settings settings = {
                    "0 = off, 50 = vanilla, 100 = twice vanilla.",
         .max = 100.f,
         .parse = [](float value) { return value * 0.02f; },
+    },
+    new renodx::utils::settings::Setting{
+        .key = "FxHueClip",
+        .binding = &shader_injection.hue_clip,
+        .default_value = 50.f,
+        .label = "Hue Clip",
+        .section = "Effects",
+        .tooltip = "Emulates the vanilla hue clip effect.\n"
+                   "Vanilla clipped each colour channel at white, so bright lamps and lights turned\n"
+                   "whiter. Only colours that went past white are shifted.\n"
+                   "0 = the tone mapper's colour, 100 = vanilla's clipped hue.",
+        .max = 100.f,
+        .is_enabled = &UsesHueClip,
+        .parse = [](float value) { return value * 0.01f; },
     },
     new renodx::utils::settings::Setting{
         .key = "FxNightVisionHdr",
@@ -342,7 +369,7 @@ void OnPresetOff() {
   renodx::utils::settings::UpdateSetting("ToneMapGameNits", 203.f);
   renodx::utils::settings::UpdateSetting("ToneMapUINits", 203.f);
   renodx::utils::settings::UpdateSetting("GammaCorrection", 1.f);
-  renodx::utils::settings::UpdateSetting("ToneMapHueCorrection", 0.f);
+  renodx::utils::settings::UpdateSetting("FxHueClip", 100.f);
   renodx::utils::settings::UpdateSetting("ColorGradeExposure", 1.f);
   renodx::utils::settings::UpdateSetting("ColorGradeHighlights", 50.f);
   renodx::utils::settings::UpdateSetting("ColorGradeShadows", 50.f);
@@ -1013,7 +1040,7 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved) {
       renodx::mods::shader::force_pipeline_cloning = true;
       renodx::mods::shader::expected_constant_buffer_space = 50;
       renodx::mods::shader::expected_constant_buffer_index = 13;
-      // ps_3_0 composite: the injection goes in c50-c53 (see shared.h).
+      // ps_3_0 composite: the injection goes in c50-c54 (see shared.h).
       renodx::mods::shader::constant_buffer_offset = 50 * 4;
 
       renodx::mods::swapchain::expected_constant_buffer_index = 13;

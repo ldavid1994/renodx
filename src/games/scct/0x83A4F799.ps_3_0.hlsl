@@ -68,18 +68,19 @@ float4 main(float4 texcoord : TEXCOORD0) : COLOR {
           RENODX_TONE_MAP_SATURATION);
     }
     else {
-      // RenoDRT and None read exposure, highlights, shadows, contrast and saturation themselves.
+      // RenoDRT and None read exposure, highlights, shadows, contrast and saturation themselves, and
+      // RenoDRT its Hue Correction and Hue Shift.
       color = renodx::draw::ToneMapPass(untonemapped);
     }
-    // Hue Correction: vanilla's colour at the tone-mapped luminance, blended in by
+    // Hue Clip: vanilla's colour at the tone-mapped luminance, blended in by
     // strength, so highlights turn white the way vanilla's clipping showed them. Weighted by how far
     // the game's colour went past white (0 at white, 1 at twice white), as vanilla only clipped there.
     // None does no tone mapping, so it keeps the untouched colour.
     const float clip_weight = saturate(max(composite.r, max(composite.g, composite.b)) - 1.f);
-    const float hue_correction = (RENODX_TONE_MAP_TYPE == renodx::draw::TONE_MAP_TYPE_UNTONEMAPPED)
-                                     ? 0.f
-                                     : (CUSTOM_HUE_CORRECTION * clip_weight);
-    [branch] if (hue_correction > 0.f) {
+    const float hue_clip = (RENODX_TONE_MAP_TYPE == renodx::draw::TONE_MAP_TYPE_UNTONEMAPPED)
+                               ? 0.f
+                               : (CUSTOM_HUE_CLIP * clip_weight);
+    [branch] if (hue_clip > 0.f) {
       const float color_y = renodx::color::y::from::BT709(color);
       const float vanilla_y = renodx::color::y::from::BT709(vanilla);
       float3 corrected = vanilla * renodx::math::DivideSafe(color_y, vanilla_y, 0.f);
@@ -88,7 +89,7 @@ float4 main(float4 texcoord : TEXCOORD0) : COLOR {
       // Peak, keeping its hue, so the roll-off the tone mapper set still holds.
       const float corrected_max = max(corrected.r, max(corrected.g, corrected.b));
       corrected *= min(1.f, renodx::math::DivideSafe(peak, corrected_max, 1.f));
-      color = lerp(color, corrected, hue_correction);
+      color = lerp(color, corrected, hue_clip);
     }
   }
   return float4(renodx::draw::RenderIntermediatePass(color), 1.f);
