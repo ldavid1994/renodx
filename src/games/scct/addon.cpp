@@ -168,9 +168,9 @@ renodx::utils::settings::Settings settings = {
         .default_value = 1.f,
         .label = "Gamma Correction",
         .section = "Tone Mapping",
-        .tooltip = "How the game's SDR image is decoded.\n"
-                   "2.2 matches how the game looks on a typical SDR display.",
-        .labels = {"sRGB", "2.2"},
+        .tooltip = "Emulates a display EOTF.\n"
+                   "Off decodes the game's image as sRGB; 2.2 matches how it looks on a typical SDR display.",
+        .labels = {"Off", "2.2"},
         .is_enabled = &IsHDR,
     },
     new renodx::utils::settings::Setting{
@@ -406,7 +406,7 @@ void UpdateOutput() {
   }
 
   // The match only depends on the peak the composite passes PsychoV-30. It was fitted at Gamma
-  // Correction 2.2, where that peak is pre-corrected (srgb::Decode(ratio^(1 / 2.2))); with sRGB it is
+  // Correction 2.2, where that peak is pre-corrected (srgb::Decode(ratio^(1 / 2.2))); with Off it is
   // the ratio itself, so look up the ratio whose pre-corrected peak equals it.
   float match_ratio = shader_injection.peak_white_nits / (std::max)(shader_injection.diffuse_white_nits, 1.f);
   if (shader_injection.gamma_correction == 0.f) {
