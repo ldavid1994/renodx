@@ -1087,7 +1087,6 @@ void OnPresent(reshade::api::command_queue* queue, reshade::api::swapchain* swap
   }
   ReleaseEmfLevels();
   emf_image_drawn = false;
-  UpdateOutput();
 
   // Orphaned back buffer clone: the game keeps drawing into the proxy's first clone of
   // the back buffer after the proxy replaced it. The full-size RGBA16F target it last bound, if it
@@ -1129,6 +1128,18 @@ void OnPresent(reshade::api::command_queue* queue, reshade::api::swapchain* swap
       }
     }
   }
+}
+
+// The settings for the next game frame, written after the proxy has presented this one: the proxy's
+// swap chain pass (UI Brightness) runs inside the game's present, after OnPresent, and must use the
+// values this frame's composite and scene scale used, or a UI Brightness change shows the scene at
+// the wrong level for a frame (every frame while the slider moves). Registered after
+// renodx::mods::swapchain::Use, so it runs after the proxy's present handler.
+void OnPresentAfterProxy(reshade::api::command_queue* queue, reshade::api::swapchain* swapchain,
+                         const reshade::api::rect* source_rect, const reshade::api::rect* dest_rect,
+                         uint32_t dirty_rect_count, const reshade::api::rect* dirty_rects) {
+  if (queue->get_device()->get_api() != reshade::api::device_api::d3d9) return;
+  UpdateOutput();
 }
 
 }  // namespace
@@ -1229,6 +1240,11 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved) {
   }
   renodx::mods::swapchain::Use(fdw_reason, &shader_injection);
   renodx::mods::shader::Use(fdw_reason, custom_shaders, &shader_injection);
+  if (fdw_reason == DLL_PROCESS_ATTACH) {
+    reshade::register_event<reshade::addon_event::present>(OnPresentAfterProxy);
+  } else if (fdw_reason == DLL_PROCESS_DETACH) {
+    reshade::unregister_event<reshade::addon_event::present>(OnPresentAfterProxy);
+  }
 
   return TRUE;
 }
