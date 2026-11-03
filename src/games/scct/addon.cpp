@@ -266,8 +266,9 @@ renodx::utils::settings::Settings settings = {
         .label = "Night Vision HDR",
         .section = "Effects",
         .tooltip = "Night vision's blown-out areas go past white, raised by the game's own glow,\n"
-                   "rolling off toward Peak Brightness. Off = the game's night vision.",
-        .is_enabled = &IsHDR,
+                   "rolling off toward Peak Brightness. Off = the game's night vision.\n"
+                   "Off with the Vanilla tone mapper, which shows the game's picture.",
+        .is_enabled = &IsToneMapped,
     },
     new renodx::utils::settings::Setting{
         .key = "FxEmfHdr",
@@ -277,8 +278,9 @@ renodx::utils::settings::Settings settings = {
         .label = "EMF HDR",
         .section = "Effects",
         .tooltip = "EMF vision's glows go past white where the game's own glow adds up past it,\n"
-                   "rolling off toward Peak Brightness. Off = the game's EMF vision.",
-        .is_enabled = &IsHDR,
+                   "rolling off toward Peak Brightness. Off = the game's EMF vision.\n"
+                   "Off with the Vanilla tone mapper, which shows the game's picture.",
+        .is_enabled = &IsToneMapped,
     },
     new renodx::utils::settings::Setting{
         .value_type = renodx::utils::settings::SettingValueType::TEXT,
@@ -543,8 +545,8 @@ void RestoreReplacedDraw(ReplacedDraw* draw) {
 // every step, so it stays at or below white. With the toggle on, its image draw (0x4ADA0B05) is a
 // replaced draw with night_vision_hdr_pixel_shader, which raises what it clipped (see the shader).
 // That is a ps_3_0, which only runs with a vs_3_0, so the draw also gets night_vision_vertex_shader,
-// a port of the game's. With the toggle off, or if the shaders can't be created, the game's own
-// shaders draw it.
+// a port of the game's. With the toggle off, with the Vanilla tone mapper (always in SDR), or if the
+// shaders can't be created, the game's own shaders draw it. EMF HDR follows the same rule.
 // ---------------------------------------------------------------------------
 
 // Night vision's and EMF's ps_3_0 read their constants from c8 (vision_settings in shared.h).
@@ -556,7 +558,7 @@ constexpr UINT NIGHT_VISION_CONSTANT_REGISTER_COUNT = sizeof(NightVisionConstant
 constexpr DWORD NIGHT_VISION_GLOW_STAGES[] = {1, 2};
 
 bool OnNightVisionImageDraw(reshade::api::command_list* cmd_list) {
-  if (night_vision_hdr == 0.f || !IsHDR()) return true;
+  if (night_vision_hdr == 0.f || !IsToneMapped()) return true;
   auto* native_device = reinterpret_cast<IDirect3DDevice9*>(cmd_list->get_device()->get_native());
   if (!CreateReplacedDraw(native_device, __night_vision_vertex_shader, __night_vision_hdr_pixel_shader,
                           "Night Vision HDR", &night_vision_draw)) {
@@ -636,7 +638,7 @@ void ReleaseEmfLevels() {
 }
 
 bool OnEmfLevelsSumDraw(reshade::api::command_list* cmd_list) {
-  if (emf_hdr == 0.f || !IsHDR()) return true;
+  if (emf_hdr == 0.f || !IsToneMapped()) return true;
   auto* native_device = reinterpret_cast<IDirect3DDevice9*>(cmd_list->get_device()->get_native());
   ReleaseEmfLevels();
   for (DWORD level = 0; level < EMF_LEVEL_COUNT; ++level) {
@@ -647,7 +649,7 @@ bool OnEmfLevelsSumDraw(reshade::api::command_list* cmd_list) {
 }
 
 bool OnEmfImageDraw(reshade::api::command_list* cmd_list) {
-  if (emf_hdr == 0.f || !IsHDR()) return true;
+  if (emf_hdr == 0.f || !IsToneMapped()) return true;
   if (std::ranges::find(emf_levels, nullptr) != std::end(emf_levels)) return true;
   auto* native_device = reinterpret_cast<IDirect3DDevice9*>(cmd_list->get_device()->get_native());
   if (!CreateReplacedDraw(native_device, __emf_vertex_shader, __emf_hdr_pixel_shader, "EMF HDR", &emf_image_draw)) {
