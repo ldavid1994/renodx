@@ -68,8 +68,7 @@ float4 main(float4 texcoord : TEXCOORD0) : COLOR {
           RENODX_TONE_MAP_SATURATION);
     }
     else {
-      // RenoDRT and None read exposure, highlights, shadows, contrast and saturation themselves, and
-      // RenoDRT its Hue Correction and Hue Shift.
+      // RenoDRT and None read exposure, highlights, shadows, contrast and saturation themselves.
       color = renodx::draw::ToneMapPass(untonemapped);
     }
     // Hue Clip: vanilla's colour at the tone-mapped luminance, blended in by

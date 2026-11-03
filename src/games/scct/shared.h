@@ -3,9 +3,9 @@
 
 // Splinter Cell: Chaos Theory (Unreal Engine 2.5, D3D9, SM3.0 path).
 //
-// Must be 32bit aligned. 5 x float4.
+// Must be 32bit aligned. 4 x float4.
 // The composite replacement is ps_3_0, which has c0-c223; the game's own composite uses no float
-// constants, so the injection lives in c50-c54 (constant_buffer_offset = 50 * 4 in addon.cpp).
+// constants, so the injection lives in c50-c53 (constant_buffer_offset = 50 * 4 in addon.cpp).
 // Tone Mapper values: Vanilla 0, None 1 and RenoDRT 3 are the framework's types; Psycho-V is this
 // mod's own.
 #define CUSTOM_TONE_MAP_TYPE_PSYCHO_V 4.f
@@ -35,12 +35,7 @@ struct ShaderInjectData {
   float psycho_shadows_match;
   float psycho_highlights_match;
   float swap_chain_output_preset;  // set by the add-on from Output Mode and HDR Format
-  float tone_map_hue_correction;   // draw.hlsl's, RenoDRT only
-
-  float tone_map_hue_shift;  // draw.hlsl's, RenoDRT only
   float padding0;
-  float padding1;
-  float padding2;
 };
 
 #ifdef __cplusplus
@@ -65,7 +60,7 @@ struct EmfConstants {
 
 #if (__SHADER_TARGET_MAJOR == 3)
 
-float4 shader_injection[5] : register(c50);
+float4 shader_injection[4] : register(c50);
 
 #define RENODX_PEAK_WHITE_NITS          shader_injection[0][0]
 #define RENODX_DIFFUSE_WHITE_NITS       shader_injection[0][1]
@@ -82,8 +77,6 @@ float4 shader_injection[5] : register(c50);
 #define CUSTOM_PSYCHO_SHADOWS_MATCH     shader_injection[3][0]
 #define CUSTOM_PSYCHO_HIGHLIGHTS_MATCH  shader_injection[3][1]
 #define RENODX_SWAP_CHAIN_OUTPUT_PRESET shader_injection[3][2]
-#define RENODX_TONE_MAP_HUE_CORRECTION  shader_injection[3][3]
-#define RENODX_TONE_MAP_HUE_SHIFT       shader_injection[4][0]
 
 // Night Vision HDR and EMF HDR: the add-on's constants for their ps_3_0, after the game's own
 // (c0-c3), set for those draws only. Laid out as NightVisionConstants and EmfConstants.
@@ -121,8 +114,6 @@ cbuffer shader_injection : register(b13) {
 #define CUSTOM_PSYCHO_SHADOWS_MATCH     shader_injection.psycho_shadows_match
 #define CUSTOM_PSYCHO_HIGHLIGHTS_MATCH  shader_injection.psycho_highlights_match
 #define RENODX_SWAP_CHAIN_OUTPUT_PRESET shader_injection.swap_chain_output_preset
-#define RENODX_TONE_MAP_HUE_CORRECTION  shader_injection.tone_map_hue_correction
-#define RENODX_TONE_MAP_HUE_SHIFT       shader_injection.tone_map_hue_shift
 
 #endif
 
