@@ -6,9 +6,10 @@
  *
  * HDR output goes through RenoDX's DX11 device proxy, which gives the back buffer an RGBA16F
  * clone. The composite (0x83A4F799) is replaced so the scene keeps its values above 1.0 and is
- * display-mapped; the HUD draws onto the clone after it and the swap chain pass shows
- * it at UI Brightness. Copies to and from the back buffer are done on its clone (copy redirect),
- * so the vision passes read the real image.
+ * display-mapped, with white at 1.0. Once the scene is finished (normal view or a vision mode), the
+ * scene scale brings it to Game Brightness; the HUD draws onto the clone after it and the swap chain
+ * pass shows it at UI Brightness. Copies to and from the back buffer are done on its clone (copy
+ * redirect), so the vision passes read the real image.
  */
 
 #define ImTextureID ImU64
@@ -81,6 +82,13 @@ bool UsesHueClip() {
 
 bool IsHDR() {
   return output_mode_setting->GetValue() != OUTPUT_MODE_SDR;
+}
+
+// The renodx::draw encoding the swap chain pass decodes the back buffer with
+// (RENODX_INTERMEDIATE_ENCODING): ENCODING_SRGB (1) for Gamma Correction Off, ENCODING_GAMMA_2_2 (2)
+// for 2.2. The add-on's own draws decode and encode with it.
+float SwapChainDecoding() {
+  return shader_injection.gamma_correction + 1.f;
 }
 
 // Tone Mapper, Peak, Game and UI Brightness and Gamma Correction have no binding: UpdateOutput
@@ -453,7 +461,8 @@ reshade::api::resource_view last_render_target = {0u};
 
 // ---------------------------------------------------------------------------
 // Replaced draws: game draws that run with the add-on's own shaders (night vision's image, EMF's
-// image and EMF's warp). D3D9 state stays set for later draws, so the game's values of the state a
+// image and EMF's warp), and the scene scale, the add-on's own draw between the game's, which puts
+// the game's state back the same way. D3D9 state stays set for later draws, so the game's values of the state a
 // replaced draw sets are put back once it has drawn. A state block recorded from that draw's own
 // binds holds exactly that state: it captures the game's values before the draw and applies them
 // after it. The block holds references to what it captured, game textures in D3DPOOL_DEFAULT among
@@ -470,7 +479,8 @@ struct ReplacedDraw {
 ReplacedDraw night_vision_draw;
 ReplacedDraw emf_image_draw;
 ReplacedDraw emf_warp_draw;
-constexpr ReplacedDraw* REPLACED_DRAWS[] = {&night_vision_draw, &emf_image_draw, &emf_warp_draw};
+ReplacedDraw scene_scale_draw;
+constexpr ReplacedDraw* REPLACED_DRAWS[] = {&night_vision_draw, &emf_image_draw, &emf_warp_draw, &scene_scale_draw};
 
 void ReleaseReplacedDraw(ReplacedDraw* draw) {
   if (draw->vertex_shader != nullptr) {
@@ -550,8 +560,11 @@ void RestoreReplacedDraw(ReplacedDraw* draw) {
 // shaders can't be created, the game's own shaders draw it. EMF HDR follows the same rule.
 // ---------------------------------------------------------------------------
 
-// Night vision's and EMF's ps_3_0 read their constants from c8 (vision_settings in shared.h).
-constexpr UINT VISION_FIRST_CONSTANT_REGISTER = 8;
+// The add-on's ps_3_0 (night vision, EMF, the scene scale) read their constants from c8
+// (draw_settings in shared.h).
+constexpr UINT DRAW_SETTINGS_REGISTER = 8;
+// A finished scene waits for the scene scale (see that section): set by the draws that finish one.
+bool scene_awaits_scale = false;
 static_assert(sizeof(NightVisionConstants) % (4 * sizeof(float)) == 0,
               "NightVisionConstants must fill whole float4 registers");
 constexpr UINT NIGHT_VISION_CONSTANT_REGISTER_COUNT = sizeof(NightVisionConstants) / (4 * sizeof(float));
@@ -568,8 +581,8 @@ bool OnNightVisionImageDraw(reshade::api::command_list* cmd_list) {
 
   NightVisionConstants constants = {
       .glow_sizes = {1.f, 1.f, 1.f, 1.f},
-      .peak_ratio = shader_injection.peak_white_nits / (std::max)(shader_injection.graphics_white_nits, 1.f),
-      .gamma_correction = shader_injection.gamma_correction,
+      .peak_ratio = shader_injection.peak_white_nits / (std::max)(shader_injection.diffuse_white_nits, 1.f),
+      .encoding = SwapChainDecoding(),
   };
   for (size_t index = 0; index < std::size(NIGHT_VISION_GLOW_STAGES); ++index) {
     IDirect3DBaseTexture9* glow = nullptr;
@@ -590,7 +603,7 @@ bool OnNightVisionImageDraw(reshade::api::command_list* cmd_list) {
           native_device->SetSamplerState(stage, D3DSAMP_MAGFILTER, D3DTEXF_LINEAR);
           native_device->SetSamplerState(stage, D3DSAMP_MINFILTER, D3DTEXF_LINEAR);
         }
-        native_device->SetPixelShaderConstantF(VISION_FIRST_CONSTANT_REGISTER,
+        native_device->SetPixelShaderConstantF(DRAW_SETTINGS_REGISTER,
                                                reinterpret_cast<const float*>(&constants),
                                                NIGHT_VISION_CONSTANT_REGISTER_COUNT);
         native_device->SetVertexShader(night_vision_draw.vertex_shader);
@@ -602,6 +615,7 @@ bool OnNightVisionImageDraw(reshade::api::command_list* cmd_list) {
 
 void OnNightVisionImageDrawn(reshade::api::command_list* cmd_list) {
   RestoreReplacedDraw(&night_vision_draw);
+  scene_awaits_scale = true;
 }
 
 // ---------------------------------------------------------------------------
@@ -659,8 +673,8 @@ bool OnEmfImageDraw(reshade::api::command_list* cmd_list) {
   }
 
   EmfConstants constants = {
-      .peak_ratio = shader_injection.peak_white_nits / (std::max)(shader_injection.graphics_white_nits, 1.f),
-      .gamma_correction = shader_injection.gamma_correction,
+      .peak_ratio = shader_injection.peak_white_nits / (std::max)(shader_injection.diffuse_white_nits, 1.f),
+      .encoding = SwapChainDecoding(),
   };
   for (size_t index = 0; index < std::size(EMF_BUMP_MATRIX_STATES); ++index) {
     DWORD entry = 0;
@@ -684,7 +698,7 @@ bool OnEmfImageDraw(reshade::api::command_list* cmd_list) {
           }
           native_device->SetTexture(stage, emf_levels[level]);
         }
-        native_device->SetPixelShaderConstantF(VISION_FIRST_CONSTANT_REGISTER,
+        native_device->SetPixelShaderConstantF(DRAW_SETTINGS_REGISTER,
                                                reinterpret_cast<const float*>(&constants),
                                                EMF_CONSTANT_REGISTER_COUNT);
         native_device->SetVertexShader(emf_image_draw.vertex_shader);
@@ -699,29 +713,57 @@ void OnEmfImageDrawn(reshade::api::command_list* cmd_list) {
     emf_image_drawn = true;
   }
   RestoreReplacedDraw(&emf_image_draw);
+  scene_awaits_scale = true;
+}
+
+// A 16-bit copy of the screen, for the add-on's draws that read the screen while drawing over it:
+// EMF HDR's warp and the scene scale. It is in D3DPOOL_DEFAULT, so it is released before a device
+// reset (OnDestroySwapchain), and made again for a new device or screen size.
+IDirect3DTexture9* screen_copy = nullptr;
+IDirect3DDevice9* screen_copy_device = nullptr;
+
+void ReleaseScreenCopy() {
+  if (screen_copy != nullptr) {
+    screen_copy->Release();
+    screen_copy = nullptr;
+  }
+  screen_copy_device = nullptr;
+}
+
+// Copies render_target (described by target_desc) into the screen copy and returns it, or nullptr.
+IDirect3DTexture9* CopyScreen(IDirect3DDevice9* native_device, IDirect3DSurface9* render_target,
+                              const D3DSURFACE_DESC& target_desc) {
+  if (screen_copy != nullptr) {
+    D3DSURFACE_DESC copy_desc = {};
+    screen_copy->GetLevelDesc(0, &copy_desc);
+    if (screen_copy_device != native_device || copy_desc.Width != target_desc.Width
+        || copy_desc.Height != target_desc.Height) {
+      ReleaseScreenCopy();
+    }
+  }
+  if (screen_copy == nullptr) {
+    if (FAILED(native_device->CreateTexture(target_desc.Width, target_desc.Height, 1, D3DUSAGE_RENDERTARGET,
+                                            D3DFMT_A16B16G16R16F, D3DPOOL_DEFAULT, &screen_copy, nullptr))) {
+      reshade::log::message(reshade::log::level::warning, "[scct] could not create the screen copy");
+      screen_copy = nullptr;
+      return nullptr;
+    }
+    screen_copy_device = native_device;
+  }
+  IDirect3DSurface9* copy_surface = nullptr;
+  if (FAILED(screen_copy->GetSurfaceLevel(0, &copy_surface))) return nullptr;
+  native_device->StretchRect(render_target, nullptr, copy_surface, nullptr, D3DTEXF_NONE);
+  copy_surface->Release();
+  return screen_copy;
 }
 
 // After EMF's image, the game copies the screen to an 8-bit texture and draws it back through a
 // grid that warps it (0x2E3398C1), which would clip it at white again. Once EMF HDR has drawn the
-// image, that draw is a replaced draw that reads a 16-bit copy of the screen instead, with
-// emf_warp_pixel_shader and the game's vertex shader. The copy is in D3DPOOL_DEFAULT, so it is
-// released before a device reset (OnDestroySwapchain).
-IDirect3DTexture9* emf_warp_screen_copy = nullptr;
-
-void ReleaseEmfWarpCopy() {
-  if (emf_warp_screen_copy != nullptr) {
-    emf_warp_screen_copy->Release();
-    emf_warp_screen_copy = nullptr;
-  }
-}
-
+// image, that draw is a replaced draw that reads the screen copy instead, with emf_warp_pixel_shader
+// and the game's vertex shader.
 bool OnEmfWarpDraw(reshade::api::command_list* cmd_list) {
   if (!emf_image_drawn) return true;
   auto* native_device = reinterpret_cast<IDirect3DDevice9*>(cmd_list->get_device()->get_native());
-  if (emf_warp_draw.device != native_device) {
-    // The copy belongs to the old device.
-    ReleaseEmfWarpCopy();
-  }
   if (!CreateReplacedDraw(native_device, {}, __emf_warp_pixel_shader, "EMF HDR warp", &emf_warp_draw)) {
     return true;
   }
@@ -739,35 +781,14 @@ bool OnEmfWarpDraw(reshade::api::command_list* cmd_list) {
   if (screen != nullptr) {
     screen->Release();
   }
-  if (emf_warp_screen_copy != nullptr) {
-    D3DSURFACE_DESC copy_desc = {};
-    emf_warp_screen_copy->GetLevelDesc(0, &copy_desc);
-    if (copy_desc.Width != target_desc.Width || copy_desc.Height != target_desc.Height) {
-      ReleaseEmfWarpCopy();
-    }
-  }
-  if (is_screen_redraw && emf_warp_screen_copy == nullptr
-      && FAILED(native_device->CreateTexture(target_desc.Width, target_desc.Height, 1, D3DUSAGE_RENDERTARGET,
-                                             D3DFMT_A16B16G16R16F, D3DPOOL_DEFAULT, &emf_warp_screen_copy, nullptr))) {
-    reshade::log::message(reshade::log::level::warning, "[scct] EMF HDR: could not create the screen copy");
-    emf_warp_screen_copy = nullptr;
-  }
-  IDirect3DSurface9* copy_surface = nullptr;
-  if (is_screen_redraw && emf_warp_screen_copy != nullptr) {
-    emf_warp_screen_copy->GetSurfaceLevel(0, &copy_surface);
-  }
-  if (copy_surface == nullptr) {
-    render_target->Release();
-    return true;
-  }
-  native_device->StretchRect(render_target, nullptr, copy_surface, nullptr, D3DTEXF_NONE);
-  copy_surface->Release();
+  IDirect3DTexture9* copy = (is_screen_redraw ? CopyScreen(native_device, render_target, target_desc) : nullptr);
   render_target->Release();
+  if (copy == nullptr) return true;
 
   ReplaceDraw(
       native_device,
       [&]() {
-        native_device->SetTexture(0, emf_warp_screen_copy);
+        native_device->SetTexture(0, copy);
         native_device->SetPixelShader(emf_warp_draw.pixel_shader);
       },
       &emf_warp_draw);
@@ -778,11 +799,110 @@ void OnEmfWarpDrawn(reshade::api::command_list* cmd_list) {
   RestoreReplacedDraw(&emf_warp_draw);
 }
 
+// ---------------------------------------------------------------------------
+// Scene scale. The composite leaves the scene with white at 1.0, as the game drew it
+// (RENODX_INTERMEDIATE_SCALING in shared.h), so night vision reads it as vanilla did; thermal and
+// EMF draw at that white too. The swap chain pass shows the back buffer at UI Brightness. Once the
+// scene is finished, before its first HUD draw (0x8F122047) or at the present, the scene scale draws
+// it again from the screen copy with scene_scale_pixel_shader, at Game Brightness. The draws that
+// finish a scene mark it: the composite, night vision's image, thermal's colour ramp and EMF's image.
+// Menus, loading screens and videos draw none of them and stay at UI Brightness. Skipped where Game
+// and UI Brightness are equal, as always in SDR.
+// ---------------------------------------------------------------------------
+
+static_assert(sizeof(SceneScaleConstants) % (4 * sizeof(float)) == 0,
+              "SceneScaleConstants must fill whole float4 registers");
+constexpr UINT SCENE_SCALE_CONSTANT_REGISTER_COUNT = sizeof(SceneScaleConstants) / (4 * sizeof(float));
+constexpr std::pair<D3DRENDERSTATETYPE, DWORD> SCENE_SCALE_RENDER_STATES[] = {
+    {D3DRS_ZENABLE, FALSE}, {D3DRS_ZWRITEENABLE, FALSE}, {D3DRS_STENCILENABLE, FALSE}, {D3DRS_ALPHABLENDENABLE, FALSE}, {D3DRS_ALPHATESTENABLE, FALSE}, {D3DRS_SRGBWRITEENABLE, FALSE}, {D3DRS_CULLMODE, D3DCULL_NONE}, {D3DRS_SCISSORTESTENABLE, FALSE}, {D3DRS_FOGENABLE, FALSE}, {D3DRS_CLIPPLANEENABLE, 0u}, {D3DRS_COLORWRITEENABLE, 0xFu}};
+// Point sampled and clamped, pixel for pixel.
+constexpr std::pair<D3DSAMPLERSTATETYPE, DWORD> SCENE_SCALE_SAMPLER_STATES[] = {
+    {D3DSAMP_MAGFILTER, D3DTEXF_POINT}, {D3DSAMP_MINFILTER, D3DTEXF_POINT}, {D3DSAMP_MIPFILTER, D3DTEXF_NONE}, {D3DSAMP_ADDRESSU, D3DTADDRESS_CLAMP}, {D3DSAMP_ADDRESSV, D3DTADDRESS_CLAMP}, {D3DSAMP_SRGBTEXTURE, FALSE}};
+
+void OnSceneDrawn(reshade::api::command_list* cmd_list) {
+  scene_awaits_scale = true;
+}
+
+// Scales the finished scene, if one waits, on the render target the game draws the HUD to.
+// trigger names the draw or the present for the one-time log line.
+void ScaleScene(IDirect3DDevice9* native_device, const char* trigger) {
+  if (!std::exchange(scene_awaits_scale, false)) return;
+  const float scale = shader_injection.diffuse_white_nits / (std::max)(shader_injection.graphics_white_nits, 1.f);
+  if (scale == 1.f) return;
+  if (!CreateReplacedDraw(native_device, __scene_scale_vertex_shader, __scene_scale_pixel_shader, "Scene scale",
+                          &scene_scale_draw)) {
+    return;
+  }
+  IDirect3DSurface9* render_target = nullptr;
+  if (FAILED(native_device->GetRenderTarget(0, &render_target)) || render_target == nullptr) return;
+  D3DSURFACE_DESC target_desc = {};
+  render_target->GetDesc(&target_desc);
+  // The back buffer's RGBA16F clone; any other target isn't the screen.
+  IDirect3DTexture9* copy = ((target_desc.Format == D3DFMT_A16B16G16R16F)
+                                 ? CopyScreen(native_device, render_target, target_desc)
+                                 : nullptr);
+  render_target->Release();
+  if (copy == nullptr) return;
+
+  const SceneScaleConstants constants = {.scale = scale, .encoding = SwapChainDecoding()};
+  const D3DVIEWPORT9 viewport = {.Width = target_desc.Width, .Height = target_desc.Height, .MaxZ = 1.f};
+  ReplaceDraw(
+      native_device,
+      [&]() {
+        native_device->SetTexture(0, copy);
+        for (const auto& [state, value] : SCENE_SCALE_SAMPLER_STATES) {
+          native_device->SetSamplerState(0, state, value);
+        }
+        for (const auto& [state, value] : SCENE_SCALE_RENDER_STATES) {
+          native_device->SetRenderState(state, value);
+        }
+        native_device->SetViewport(&viewport);
+        native_device->SetPixelShaderConstantF(DRAW_SETTINGS_REGISTER, reinterpret_cast<const float*>(&constants),
+                                               SCENE_SCALE_CONSTANT_REGISTER_COUNT);
+        native_device->SetVertexShader(scene_scale_draw.vertex_shader);
+        native_device->SetPixelShader(scene_scale_draw.pixel_shader);
+        native_device->SetFVF(D3DFVF_XYZW | D3DFVF_TEX1);
+        // Recorded so the block puts back the game's stream 0, which DrawPrimitiveUP clears.
+        native_device->SetStreamSource(0, nullptr, 0, 0);
+      },
+      &scene_scale_draw);
+  if (!scene_scale_draw.replaced) return;
+
+  struct Vertex {
+    float x, y, z, w, u, v;
+  };
+  // In clip space, half a pixel up and left: D3D9 puts pixel centres on integer coordinates, so each
+  // pixel then samples its own texel.
+  const float half_pixel_x = 1.f / static_cast<float>(target_desc.Width);
+  const float half_pixel_y = 1.f / static_cast<float>(target_desc.Height);
+  const Vertex quad[] = {
+      {.x = -1.f - half_pixel_x, .y = 1.f + half_pixel_y, .z = 0.f, .w = 1.f, .u = 0.f, .v = 0.f},
+      {.x = 1.f - half_pixel_x, .y = 1.f + half_pixel_y, .z = 0.f, .w = 1.f, .u = 1.f, .v = 0.f},
+      {.x = -1.f - half_pixel_x, .y = -1.f + half_pixel_y, .z = 0.f, .w = 1.f, .u = 0.f, .v = 1.f},
+      {.x = 1.f - half_pixel_x, .y = -1.f + half_pixel_y, .z = 0.f, .w = 1.f, .u = 1.f, .v = 1.f},
+  };
+  native_device->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP, 2, quad, sizeof(Vertex));
+  RestoreReplacedDraw(&scene_scale_draw);
+
+  static std::vector<const char*> logged_triggers;
+  if (std::ranges::find(logged_triggers, trigger) == logged_triggers.end()) {
+    logged_triggers.push_back(trigger);
+    reshade::log::message(reshade::log::level::info,
+                          (std::string("[scct] scene scaled to Game Brightness at ") + trigger).c_str());
+  }
+}
+
+bool OnHudDraw(reshade::api::command_list* cmd_list) {
+  ScaleScene(reinterpret_cast<IDirect3DDevice9*>(cmd_list->get_device()->get_native()), "the HUD (0x8F122047)");
+  return true;
+}
+
 void OnDestroySwapchain(reshade::api::swapchain* swapchain, bool resize) {
   if (swapchain->get_device()->get_api() != reshade::api::device_api::d3d9) return;
   last_render_target = {0u};
+  scene_awaits_scale = false;
   ReleaseEmfLevels();
-  ReleaseEmfWarpCopy();
+  ReleaseScreenCopy();
   for (auto* draw : REPLACED_DRAWS) {
     if (draw->game_state != nullptr) {
       draw->game_state->Release();
@@ -820,8 +940,8 @@ void OnDestroyDevice(reshade::api::device* device) {
   last_render_target = {0u};
   ReleaseEmfLevels();
   auto* native_device = reinterpret_cast<IDirect3DDevice9*>(device->get_native());
-  if (emf_warp_draw.device == native_device) {
-    ReleaseEmfWarpCopy();
+  if (screen_copy_device == native_device) {
+    ReleaseScreenCopy();
   }
   for (auto* draw : REPLACED_DRAWS) {
     if (draw->device == native_device) {
@@ -958,6 +1078,13 @@ void OnPresent(reshade::api::command_queue* queue, reshade::api::swapchain* swap
     return;
   }
 
+  // A frame without HUD draws: the scene is scaled here, before the orphaned clone is forwarded.
+  if (scene_awaits_scale) {
+    auto* native_device = reinterpret_cast<IDirect3DDevice9*>(device->get_native());
+    native_device->BeginScene();
+    ScaleScene(native_device, "the present");
+    native_device->EndScene();
+  }
   ReleaseEmfLevels();
   emf_image_drawn = false;
   UpdateOutput();
@@ -1059,6 +1186,17 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved) {
           .crc32 = 0x2E3398C1u,
           .on_draw = &OnEmfWarpDraw,
           .on_drawn = &OnEmfWarpDrawn,
+      };
+      // The scene scale: the composite and thermal's colour ramp finish a scene (night vision's and
+      // EMF's image draws mark it in their own hooks), and the HUD's first draw scales it.
+      custom_shaders[0x83A4F799u].on_drawn = &OnSceneDrawn;
+      custom_shaders[0xC294F957u] = {
+          .crc32 = 0xC294F957u,
+          .on_drawn = &OnSceneDrawn,
+      };
+      custom_shaders[0x8F122047u] = {
+          .crc32 = 0x8F122047u,
+          .on_draw = &OnHudDraw,
       };
 
       reshade::register_event<reshade::addon_event::init_swapchain>(OnInitSwapchain);

@@ -40,24 +40,29 @@ struct ShaderInjectData {
 
 #ifdef __cplusplus
 
-// Night Vision HDR's and EMF HDR's constants from c8, in float4 registers as the add-on uploads
-// them. The shaders read them through vision_settings below: HLSL would lay these arrays out one
-// element per register.
-// The vision images are the game's encoded output, shown with white at UI Brightness: Peak is in
-// those units, and they are decoded as the swap chain decodes them (Gamma Correction).
+// The constants of the add-on's own draws (Night Vision HDR, EMF HDR, the scene scale) from c8, in
+// float4 registers as the add-on uploads them. The shaders read them through draw_settings below:
+// HLSL would lay these arrays out one element per register. Encoding is renodx::draw's
+// (ENCODING_SRGB or ENCODING_GAMMA_2_2), the one the swap chain pass decodes the back buffer with.
 struct NightVisionConstants {
-  float glow_sizes[4];     // in texels, xy: s1, zw: s2
-  float peak_ratio;        // Peak over UI Brightness
-  float gamma_correction;  // 0 = sRGB, 1 = 2.2
+  float glow_sizes[4];  // in texels, xy: s1, zw: s2
+  float peak_ratio;     // Peak over Game Brightness
+  float encoding;
   float padding0[2];
 };
 
 struct EmfConstants {
-  float bump_matrix[4];    // BUMPENVMAT00, 01, 10, 11 of stage 3
-  float peak_ratio;        // Peak over UI Brightness
-  float gamma_correction;  // 0 = sRGB, 1 = 2.2
+  float bump_matrix[4];  // BUMPENVMAT00, 01, 10, 11 of stage 3
+  float peak_ratio;      // Peak over Game Brightness
+  float encoding;
   float padding0[2];
   float level_sizes[4];  // in texels, per level (square)
+};
+
+struct SceneScaleConstants {
+  float scale;  // Game over UI Brightness
+  float encoding;
+  float padding0[2];
 };
 
 #else
@@ -82,15 +87,18 @@ float4 shader_injection[4] : register(c50);
 #define CUSTOM_PSYCHO_HIGHLIGHTS_MATCH  shader_injection[3][1]
 #define RENODX_SWAP_CHAIN_OUTPUT_PRESET shader_injection[3][2]
 
-// Night Vision HDR and EMF HDR: the add-on's constants for their ps_3_0, after the game's own
-// (c0-c3), set for those draws only. Laid out as NightVisionConstants and EmfConstants.
-float4 vision_settings[3] : register(c8);
+// The add-on's own draws (Night Vision HDR, EMF HDR, the scene scale): their constants, after the
+// game's own (c0-c3), set for those draws only. Laid out as NightVisionConstants, EmfConstants and
+// SceneScaleConstants.
+float4 draw_settings[3] : register(c8);
 
-#define CUSTOM_NIGHT_VISION_GLOW_SIZES vision_settings[0]    // in texels, xy: s1, zw: s2
-#define CUSTOM_EMF_BUMP_MATRIX         vision_settings[0]    // BUMPENVMAT00, 01, 10, 11 of stage 3
-#define CUSTOM_VISION_PEAK_RATIO       vision_settings[1].x  // Peak over UI Brightness
-#define CUSTOM_VISION_GAMMA_CORRECTION vision_settings[1].y  // 0 = sRGB, 1 = 2.2
-#define CUSTOM_EMF_LEVEL_SIZES         vision_settings[2]    // in texels, per level (square)
+#define CUSTOM_NIGHT_VISION_GLOW_SIZES draw_settings[0]    // in texels, xy: s1, zw: s2
+#define CUSTOM_EMF_BUMP_MATRIX         draw_settings[0]    // BUMPENVMAT00, 01, 10, 11 of stage 3
+#define CUSTOM_VISION_PEAK_RATIO       draw_settings[1].x  // Peak over Game Brightness
+#define CUSTOM_VISION_ENCODING         draw_settings[1].y  // the swap chain's decoding
+#define CUSTOM_EMF_LEVEL_SIZES         draw_settings[2]    // in texels, per level (square)
+#define CUSTOM_SCENE_SCALE             draw_settings[0].x  // Game over UI Brightness
+#define CUSTOM_SCENE_ENCODING          draw_settings[0].y  // the swap chain's decoding
 
 #else
 
@@ -126,6 +134,10 @@ cbuffer shader_injection : register(b13) {
 // keeps its defaults (scRGB, BT.709, no clamp or gamut compression).
 
 #define RENODX_RENO_DRT_TONE_MAP_METHOD renodx::tonemap::renodrt::config::tone_map_method::REINHARD
+// The composite leaves the scene at Game Brightness 1 (white at 1.0, as the game drew it), so night
+// vision reads it as vanilla did; the scene scale pass brings the finished scene to Game Brightness
+// against the HUD's UI Brightness before the first HUD draw.
+#define RENODX_INTERMEDIATE_SCALING     1.f
 
 #include "../../shaders/renodx.hlsl"
 

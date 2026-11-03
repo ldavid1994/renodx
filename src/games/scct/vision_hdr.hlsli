@@ -32,18 +32,15 @@ float4 CubicSample(sampler2D glow, float2 texcoord, float2 size) {
               first_weight.y);
 }
 
-// The game's encoded image in linear light, decoded as the swap chain decodes it (Gamma Correction:
-// sRGB or 2.2), so the light past white lands where the display shows it and Peak holds.
-float3 DecodeVision(float3 encoded) {
-  if (CUSTOM_VISION_GAMMA_CORRECTION > 0.f) return pow(max(0.f, encoded), 2.2f);
-  return renodx::color::srgb::DecodeSafe(encoded);
-}
+// The image is the game's encoded output, decoded and encoded as the swap chain decodes it
+// (CUSTOM_VISION_ENCODING: sRGB or 2.2 for Gamma Correction), so the light past white lands where
+// the display shows it and Peak holds.
 
 // The light (linear, in units of white) that an encoded peak puts past white: eased in with a
 // soft knee, then at most what Peak leaves above white. x / (1 + x / limit) approaches that limit
 // without reaching it, so the light rolls off toward Peak instead of clipping flat there.
 float RolledOffExcess(float peak, float peak_ratio) {
-  const float past_white = DecodeVision(max(0.f, peak).xxx).x - 1.f;
+  const float past_white = renodx::draw::DecodeColor(max(0.f, peak).xxx, CUSTOM_VISION_ENCODING).x - 1.f;
   float excess = max(0.f, past_white);
   if (abs(past_white) < EXCESS_KNEE) {
     excess = (past_white + EXCESS_KNEE) * (past_white + EXCESS_KNEE) / (4.f * EXCESS_KNEE);
@@ -56,12 +53,11 @@ float RolledOffExcess(float peak, float peak_ratio) {
 // keeps the hue the game clips to, dithered as the layer grows.
 float3 AddLight(float3 color, float added, float2 pixel_position) {
   const float image_peak = max(color.r, max(color.g, color.b));
-  const float3 image_white = DecodeVision(color / max(image_peak, 1e-4f));
+  const float3 image_white = renodx::draw::DecodeColor(color / max(image_peak, 1e-4f), CUSTOM_VISION_ENCODING);
   const float dither = frac(dot(pixel_position, DITHER_PATTERN)) - 0.5f;
-  const float3 linear_color = (DecodeVision(color) + added * image_white)
+  const float3 linear_color = (renodx::draw::DecodeColor(color, CUSTOM_VISION_ENCODING) + added * image_white)
                               * (1.f + dither * DITHER_STRENGTH * saturate(added * DITHER_ONSET));
-  if (CUSTOM_VISION_GAMMA_CORRECTION > 0.f) return pow(max(0.f, linear_color), 1.f / 2.2f);
-  return renodx::color::srgb::EncodeSafe(max(0.f, linear_color));
+  return renodx::draw::EncodeColor(max(0.f, linear_color), CUSTOM_VISION_ENCODING);
 }
 
 #endif  // SRC_GAMES_SCCT_VISION_HDR_HLSLI_
