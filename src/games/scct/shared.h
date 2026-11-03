@@ -38,7 +38,25 @@ struct ShaderInjectData {
   float padding0;
 };
 
-#ifndef __cplusplus
+#ifdef __cplusplus
+
+// Night Vision HDR's and EMF HDR's constants from c8, in float4 registers as the add-on uploads
+// them. The shaders read them through vision_settings below: HLSL would lay these arrays out one
+// element per register.
+struct NightVisionConstants {
+  float glow_sizes[4];  // in texels, xy: s1, zw: s2
+  float peak_ratio;     // Peak over Game Brightness
+  float padding0[3];
+};
+
+struct EmfConstants {
+  float bump_matrix[4];  // BUMPENVMAT00, 01, 10, 11 of stage 3
+  float peak_ratio;      // Peak over Game Brightness
+  float padding0[3];
+  float level_sizes[4];  // in texels, per level (square)
+};
+
+#else
 
 #if (__SHADER_TARGET_MAJOR == 3)
 
@@ -61,7 +79,7 @@ float4 shader_injection[4] : register(c50);
 #define RENODX_SWAP_CHAIN_OUTPUT_PRESET shader_injection[3][2]
 
 // Night Vision HDR and EMF HDR: the add-on's constants for their ps_3_0, after the game's own
-// (c0-c3), set for those draws only.
+// (c0-c3), set for those draws only. Laid out as NightVisionConstants and EmfConstants.
 float4 vision_settings[3] : register(c8);
 
 #define CUSTOM_NIGHT_VISION_GLOW_SIZES vision_settings[0]    // in texels, xy: s1, zw: s2
@@ -105,7 +123,7 @@ cbuffer shader_injection : register(b13) {
 #define RENODX_RENO_DRT_TONE_MAP_METHOD renodx::tonemap::renodrt::config::tone_map_method::REINHARD
 // The composite applies the mod's Hue Correction after every tone mapper, so ToneMapPass's own (on by
 // default for RenoDRT) stays off: one correction, set by the slider.
-#define RENODX_TONE_MAP_HUE_CORRECTION 0.f
+#define RENODX_TONE_MAP_HUE_CORRECTION  0.f
 
 #include "../../shaders/renodx.hlsl"
 

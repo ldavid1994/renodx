@@ -458,9 +458,11 @@ reshade::api::resource_view last_render_target = {0u};
 // created, the game's own shaders draw it.
 // ---------------------------------------------------------------------------
 
-// c8: the glows' sizes, c9.x: Peak over Game Brightness, the most it may go past white.
-constexpr UINT NIGHT_VISION_FIRST_CONSTANT_REGISTER = 8;
-constexpr UINT NIGHT_VISION_CONSTANT_REGISTER_COUNT = 2;
+// Night vision's and EMF's ps_3_0 read their constants from c8 (vision_settings in shared.h).
+constexpr UINT VISION_FIRST_CONSTANT_REGISTER = 8;
+static_assert(sizeof(NightVisionConstants) % (4 * sizeof(float)) == 0,
+              "NightVisionConstants must fill whole float4 registers");
+constexpr UINT NIGHT_VISION_CONSTANT_REGISTER_COUNT = sizeof(NightVisionConstants) / (4 * sizeof(float));
 // The glows the shader upsamples; its cubic upsampling is built on bilinear taps.
 constexpr DWORD NIGHT_VISION_GLOW_STAGES[] = {1, 2};
 
@@ -509,7 +511,7 @@ struct NightVisionSavedState {
   bool has_saved_state = false;
   IDirect3DVertexShader9* vertex_shader = nullptr;
   IDirect3DPixelShader9* pixel_shader = nullptr;
-  float constants[4 * NIGHT_VISION_CONSTANT_REGISTER_COUNT] = {};
+  NightVisionConstants constants = {};
   NightVisionGlowFilters glow_filters[std::size(NIGHT_VISION_GLOW_STAGES)];
 };
 NightVisionSavedState night_vision_saved_state;
@@ -525,10 +527,12 @@ bool OnNightVisionImageDraw(reshade::api::command_list* cmd_list) {
   auto& saved = night_vision_saved_state;
   native_device->GetVertexShader(&saved.vertex_shader);
   native_device->GetPixelShader(&saved.pixel_shader);
-  native_device->GetPixelShaderConstantF(NIGHT_VISION_FIRST_CONSTANT_REGISTER, saved.constants,
+  native_device->GetPixelShaderConstantF(VISION_FIRST_CONSTANT_REGISTER, reinterpret_cast<float*>(&saved.constants),
                                          NIGHT_VISION_CONSTANT_REGISTER_COUNT);
-  const float peak_ratio = shader_injection.peak_white_nits / (std::max)(shader_injection.diffuse_white_nits, 1.f);
-  float constants[4 * NIGHT_VISION_CONSTANT_REGISTER_COUNT] = {1.f, 1.f, 1.f, 1.f, peak_ratio, 0.f, 0.f, 0.f};
+  NightVisionConstants constants = {
+      .glow_sizes = {1.f, 1.f, 1.f, 1.f},
+      .peak_ratio = shader_injection.peak_white_nits / (std::max)(shader_injection.diffuse_white_nits, 1.f),
+  };
   for (size_t index = 0; index < std::size(NIGHT_VISION_GLOW_STAGES); ++index) {
     const DWORD stage = NIGHT_VISION_GLOW_STAGES[index];
     native_device->GetSamplerState(stage, D3DSAMP_MAGFILTER, &saved.glow_filters[index].mag_filter);
@@ -539,13 +543,13 @@ bool OnNightVisionImageDraw(reshade::api::command_list* cmd_list) {
     if (SUCCEEDED(native_device->GetTexture(stage, &glow)) && glow != nullptr) {
       D3DSURFACE_DESC glow_desc = {};
       if (glow->GetType() == D3DRTYPE_TEXTURE && SUCCEEDED(static_cast<IDirect3DTexture9*>(glow)->GetLevelDesc(0, &glow_desc))) {
-        constants[2 * index] = static_cast<float>(glow_desc.Width);
-        constants[(2 * index) + 1] = static_cast<float>(glow_desc.Height);
+        constants.glow_sizes[2 * index] = static_cast<float>(glow_desc.Width);
+        constants.glow_sizes[(2 * index) + 1] = static_cast<float>(glow_desc.Height);
       }
       glow->Release();
     }
   }
-  native_device->SetPixelShaderConstantF(NIGHT_VISION_FIRST_CONSTANT_REGISTER, constants,
+  native_device->SetPixelShaderConstantF(VISION_FIRST_CONSTANT_REGISTER, reinterpret_cast<const float*>(&constants),
                                          NIGHT_VISION_CONSTANT_REGISTER_COUNT);
   native_device->SetVertexShader(night_vision_shaders.vertex_shader);
   native_device->SetPixelShader(night_vision_shaders.pixel_shader);
@@ -565,7 +569,7 @@ void OnNightVisionImageDrawn(reshade::api::command_list* cmd_list) {
   if (saved.pixel_shader != nullptr) {
     saved.pixel_shader->Release();
   }
-  native_device->SetPixelShaderConstantF(NIGHT_VISION_FIRST_CONSTANT_REGISTER, saved.constants,
+  native_device->SetPixelShaderConstantF(VISION_FIRST_CONSTANT_REGISTER, reinterpret_cast<const float*>(&saved.constants),
                                          NIGHT_VISION_CONSTANT_REGISTER_COUNT);
   for (size_t index = 0; index < std::size(NIGHT_VISION_GLOW_STAGES); ++index) {
     const DWORD stage = NIGHT_VISION_GLOW_STAGES[index];
@@ -585,9 +589,9 @@ void OnNightVisionImageDrawn(reshade::api::command_list* cmd_list) {
 // back once it has drawn.
 // ---------------------------------------------------------------------------
 
-// c8: stage 3's bump-environment matrix, c9.x: Peak over Game Brightness, c10: the levels' sizes.
-constexpr UINT EMF_FIRST_CONSTANT_REGISTER = 8;
-constexpr UINT EMF_CONSTANT_REGISTER_COUNT = 3;
+static_assert(sizeof(EmfConstants) % (4 * sizeof(float)) == 0,
+              "EmfConstants must fill whole float4 registers");
+constexpr UINT EMF_CONSTANT_REGISTER_COUNT = sizeof(EmfConstants) / (4 * sizeof(float));
 constexpr DWORD EMF_LEVEL_COUNT = 4;
 // The game's draw uses stages 0-3; the shader reads the levels from the four after them.
 constexpr DWORD EMF_FIRST_LEVEL_STAGE = 4;
@@ -608,7 +612,7 @@ struct EmfSavedState {
   bool has_saved_state = false;
   IDirect3DVertexShader9* vertex_shader = nullptr;
   IDirect3DPixelShader9* pixel_shader = nullptr;
-  float constants[4 * EMF_CONSTANT_REGISTER_COUNT] = {};
+  EmfConstants constants = {};
   EmfLevelStage level_stages[EMF_LEVEL_COUNT];
 };
 EmfSavedState emf_saved_state;
@@ -644,16 +648,18 @@ bool OnEmfImageDraw(reshade::api::command_list* cmd_list) {
   auto& saved = emf_saved_state;
   native_device->GetVertexShader(&saved.vertex_shader);
   native_device->GetPixelShader(&saved.pixel_shader);
-  native_device->GetPixelShaderConstantF(EMF_FIRST_CONSTANT_REGISTER, saved.constants, EMF_CONSTANT_REGISTER_COUNT);
-  float constants[4 * EMF_CONSTANT_REGISTER_COUNT] = {};
+  native_device->GetPixelShaderConstantF(VISION_FIRST_CONSTANT_REGISTER, reinterpret_cast<float*>(&saved.constants),
+                                         EMF_CONSTANT_REGISTER_COUNT);
+  EmfConstants constants = {
+      .peak_ratio = shader_injection.peak_white_nits / (std::max)(shader_injection.diffuse_white_nits, 1.f),
+  };
   constexpr D3DTEXTURESTAGESTATETYPE BUMP_MATRIX_STATES[] = {D3DTSS_BUMPENVMAT00, D3DTSS_BUMPENVMAT01,
                                                              D3DTSS_BUMPENVMAT10, D3DTSS_BUMPENVMAT11};
   for (size_t index = 0; index < std::size(BUMP_MATRIX_STATES); ++index) {
     DWORD entry = 0;
     native_device->GetTextureStageState(3, BUMP_MATRIX_STATES[index], &entry);
-    constants[index] = std::bit_cast<float>(entry);
+    constants.bump_matrix[index] = std::bit_cast<float>(entry);
   }
-  constants[4] = shader_injection.peak_white_nits / (std::max)(shader_injection.diffuse_white_nits, 1.f);
   for (DWORD level = 0; level < EMF_LEVEL_COUNT; ++level) {
     const DWORD stage = EMF_FIRST_LEVEL_STAGE + level;
     auto& level_stage = saved.level_stages[level];
@@ -666,10 +672,11 @@ bool OnEmfImageDraw(reshade::api::command_list* cmd_list) {
     D3DSURFACE_DESC level_desc = {};
     if (emf_levels[level]->GetType() == D3DRTYPE_TEXTURE
         && SUCCEEDED(static_cast<IDirect3DTexture9*>(emf_levels[level])->GetLevelDesc(0, &level_desc))) {
-      constants[8 + level] = static_cast<float>(level_desc.Width);
+      constants.level_sizes[level] = static_cast<float>(level_desc.Width);
     }
   }
-  native_device->SetPixelShaderConstantF(EMF_FIRST_CONSTANT_REGISTER, constants, EMF_CONSTANT_REGISTER_COUNT);
+  native_device->SetPixelShaderConstantF(VISION_FIRST_CONSTANT_REGISTER, reinterpret_cast<const float*>(&constants),
+                                         EMF_CONSTANT_REGISTER_COUNT);
   native_device->SetVertexShader(emf_shaders.vertex_shader);
   native_device->SetPixelShader(emf_shaders.pixel_shader);
   saved.has_saved_state = true;
@@ -688,7 +695,8 @@ void OnEmfImageDrawn(reshade::api::command_list* cmd_list) {
   if (saved.pixel_shader != nullptr) {
     saved.pixel_shader->Release();
   }
-  native_device->SetPixelShaderConstantF(EMF_FIRST_CONSTANT_REGISTER, saved.constants, EMF_CONSTANT_REGISTER_COUNT);
+  native_device->SetPixelShaderConstantF(VISION_FIRST_CONSTANT_REGISTER, reinterpret_cast<const float*>(&saved.constants),
+                                         EMF_CONSTANT_REGISTER_COUNT);
   for (DWORD level = 0; level < EMF_LEVEL_COUNT; ++level) {
     const DWORD stage = EMF_FIRST_LEVEL_STAGE + level;
     const auto& level_stage = saved.level_stages[level];
