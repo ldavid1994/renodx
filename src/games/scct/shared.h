@@ -6,7 +6,7 @@
 // Must be 32bit aligned. 4 x float4.
 // The composite replacement is ps_3_0, which has c0-c223; the game's own composite uses no float
 // constants, so the injection lives in c50-c53 (constant_buffer_offset = 50 * 4 in addon.cpp).
-// Tone Mapper values: Vanilla 0, None 1 and RenoDRT 3 are the framework's types; Psycho-V is this
+// Tone Mapper values: Vanilla 0, None 1 and RenoDRT 3 are the framework's types; PsychoV-30 is this
 // mod's own.
 #define CUSTOM_TONE_MAP_TYPE_PSYCHO_V 4.f
 // Shadows at 100. Both tone mappers lift dark values by adding c * x^(2 - shadows); at 2 that is a
@@ -30,7 +30,7 @@ struct ShaderInjectData {
   float tone_map_shadows;     // 1 = neutral
   float tone_map_contrast;    // 1 = neutral
 
-  // Computed by the add-on each frame from Peak / Game Brightness: the Psycho-V shadows and
+  // Computed by the add-on each frame from Peak / Game Brightness: the PsychoV-30 shadows and
   // highlights that put it on vanilla below white. The sliders apply on top.
   float psycho_shadows_match;
   float psycho_highlights_match;

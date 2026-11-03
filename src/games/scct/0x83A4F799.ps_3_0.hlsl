@@ -47,16 +47,16 @@ float4 main(float4 texcoord : TEXCOORD0) : COLOR {
     }
     [branch] if (RENODX_TONE_MAP_TYPE == CUSTOM_TONE_MAP_TYPE_PSYCHO_V) {
       // Shadows below 50 darken with RenoDRT's curve (renodx::color::grade::ApplyUserColorGrading)
-      // before Psycho-V: below 1, Psycho-V's own shadow curve goes negative toward black, and its
+      // before PsychoV-30: below 1, PsychoV-30's own shadow curve goes negative toward black, and its
       // sign handling folds those pixels back up into blotches.
       [branch] if (RENODX_TONE_MAP_SHADOWS < 1.f) {
         const float y = renodx::color::y::from::BT709(untonemapped) / 0.18f;
         const float y_shadowed = lerp(pow(y, 2.f - RENODX_TONE_MAP_SHADOWS), y, saturate(y));
         untonemapped *= renodx::math::DivideSafe(y_shadowed, y, 0.f);
       }
-      // The match values put Psycho-V on vanilla below white for this peak (the add-on computes
+      // The match values put PsychoV-30 on vanilla below white for this peak (the add-on computes
       // them); the Highlights slider applies on top, so 50 = vanilla. Above 50, Shadows runs from
-      // the match to CUSTOM_SHADOWS_MAX, as RenoDRT's does from 1: at 2 Psycho-V's shadow curve is a
+      // the match to CUSTOM_SHADOWS_MAX, as RenoDRT's does from 1: at 2 PsychoV-30's shadow curve is a
       // flat floor under everything above black, and past 2 it goes to infinity toward black.
       color = renodx::tonemap::psychov::psychotm_test30(
           untonemapped, peak,
@@ -69,6 +69,8 @@ float4 main(float4 texcoord : TEXCOORD0) : COLOR {
     }
     else {
       // RenoDRT and None read exposure, highlights, shadows, contrast and saturation themselves.
+      // RenoDRT also applies draw.hlsl's default hue correction, which Hue Clip below then overrides
+      // wherever vanilla clipped.
       color = renodx::draw::ToneMapPass(untonemapped);
     }
     // Hue Clip: vanilla's colour at the tone-mapped luminance, blended in by

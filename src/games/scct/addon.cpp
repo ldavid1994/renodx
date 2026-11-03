@@ -114,7 +114,7 @@ renodx::utils::settings::Settings settings = {
     tone_map_type_setting = new renodx::utils::settings::Setting{
         .key = "ToneMapType",
         .value_type = renodx::utils::settings::SettingValueType::INTEGER,
-        // Psycho-V: closest to vanilla below paper white and in highlight colour.
+        // PsychoV-30: closest to vanilla below paper white and in highlight colour.
         .default_value = 3.f,
         .can_reset = true,
         .label = "Tone Mapper",
@@ -353,7 +353,7 @@ void OnPresetOff() {
   renodx::utils::settings::UpdateSetting("FxEmfHdr", 0.f);
 }
 
-// Psycho-V settings that put it on vanilla below white (vanilla is the identity there): per Peak /
+// PsychoV-30 settings that put it on vanilla below white (vanilla is the identity there): per Peak /
 // Game Brightness ratio, the shadows that match 0.2-10 nits and the highlights that match 50-203
 // nits, at Gamma Correction 2.2. Fitted on the GPU with psychotm_test30 on a grey ramp;
 // midtones then stay within 0.3-2.6%. Interpolated in log(ratio), clamped at the ends.
@@ -380,7 +380,7 @@ constexpr PsychoMatch PSYCHO_MATCH[] = {
 };
 
 // Writes what the shaders read from Output Mode, on the HDR Format chosen at startup, and the
-// Psycho-V match for the resulting Peak / Game Brightness. Run every game frame, so slider changes,
+// PsychoV-30 match for the resulting Peak / Game Brightness. Run every game frame, so slider changes,
 // presets and Reset all reach the shaders through it.
 void UpdateOutput() {
   const bool is_hdr10 = (renodx::mods::swapchain::target_format == reshade::api::format::r10g10b10a2_unorm);
