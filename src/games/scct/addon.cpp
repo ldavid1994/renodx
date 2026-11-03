@@ -266,8 +266,8 @@ renodx::utils::settings::Settings settings = {
         .label = "Night Vision HDR",
         .section = "Effects",
         .tooltip = "Night vision's blown-out areas go past white, raised by the game's own glow,\n"
-                   "rolling off toward Peak Brightness. Off = the game's night vision.\n"
-                   "Off with the Vanilla tone mapper, which shows the game's picture.",
+                   "rolling off toward Peak Brightness. Unticked = the game's night vision.\n"
+                   "Not available with the Vanilla tone mapper or in SDR, which show the game's picture.",
         .is_enabled = &IsToneMapped,
     },
     new renodx::utils::settings::Setting{
@@ -278,8 +278,8 @@ renodx::utils::settings::Settings settings = {
         .label = "EMF HDR",
         .section = "Effects",
         .tooltip = "EMF vision's glows go past white where the game's own glow adds up past it,\n"
-                   "rolling off toward Peak Brightness. Off = the game's EMF vision.\n"
-                   "Off with the Vanilla tone mapper, which shows the game's picture.",
+                   "rolling off toward Peak Brightness. Unticked = the game's EMF vision.\n"
+                   "Not available with the Vanilla tone mapper or in SDR, which show the game's picture.",
         .is_enabled = &IsToneMapped,
     },
     new renodx::utils::settings::Setting{
