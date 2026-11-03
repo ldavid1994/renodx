@@ -565,6 +565,13 @@ void RestoreReplacedDraw(ReplacedDraw* draw) {
 constexpr UINT DRAW_SETTINGS_REGISTER = 8;
 // A finished scene waits for the scene scale (see that section): set by the draws that finish one.
 bool scene_awaits_scale = false;
+// The scene scale has drawn in this frame. Night vision reads the scene after the composite, so a
+// scale before its image would make night vision's input follow UI Brightness: logged once.
+bool scene_scaled_this_frame = false;
+// Night vision drew its image in this frame, and in the one before. While it is on, the composite
+// doesn't finish the scene: night vision's image does.
+bool night_vision_this_frame = false;
+bool night_vision_last_frame = false;
 static_assert(sizeof(NightVisionConstants) % (4 * sizeof(float)) == 0,
               "NightVisionConstants must fill whole float4 registers");
 constexpr UINT NIGHT_VISION_CONSTANT_REGISTER_COUNT = sizeof(NightVisionConstants) / (4 * sizeof(float));
@@ -572,6 +579,11 @@ constexpr UINT NIGHT_VISION_CONSTANT_REGISTER_COUNT = sizeof(NightVisionConstant
 constexpr DWORD NIGHT_VISION_GLOW_STAGES[] = {1, 2};
 
 bool OnNightVisionImageDraw(reshade::api::command_list* cmd_list) {
+  static bool logged_early_scale = false;
+  if (scene_scaled_this_frame && !std::exchange(logged_early_scale, true)) {
+    reshade::log::message(reshade::log::level::warning, "[scct] the scene was scaled before night vision's image");
+  }
+  night_vision_this_frame = true;
   if (night_vision_hdr == 0.f || !IsToneMapped()) return true;
   auto* native_device = reinterpret_cast<IDirect3DDevice9*>(cmd_list->get_device()->get_native());
   if (!CreateReplacedDraw(native_device, __night_vision_vertex_shader, __night_vision_hdr_pixel_shader,
@@ -806,6 +818,8 @@ void OnEmfWarpDrawn(reshade::api::command_list* cmd_list) {
 // scene is finished, before its first HUD draw (0x8F122047) or at the present, the scene scale draws
 // it again from the screen copy with scene_scale_pixel_shader, at Game Brightness. The draws that
 // finish a scene mark it: the composite, night vision's image, thermal's colour ramp and EMF's image.
+// While night vision is on (it drew its image in the last frame), the composite doesn't: night vision
+// reads it, and the first frame after night vision is switched off shows at UI Brightness.
 // Menus, loading screens and videos draw none of them and stay at UI Brightness. Skipped where Game
 // and UI Brightness are equal, as always in SDR.
 // ---------------------------------------------------------------------------
@@ -814,13 +828,36 @@ static_assert(sizeof(SceneScaleConstants) % (4 * sizeof(float)) == 0,
               "SceneScaleConstants must fill whole float4 registers");
 constexpr UINT SCENE_SCALE_CONSTANT_REGISTER_COUNT = sizeof(SceneScaleConstants) / (4 * sizeof(float));
 constexpr std::pair<D3DRENDERSTATETYPE, DWORD> SCENE_SCALE_RENDER_STATES[] = {
-    {D3DRS_ZENABLE, FALSE}, {D3DRS_ZWRITEENABLE, FALSE}, {D3DRS_STENCILENABLE, FALSE}, {D3DRS_ALPHABLENDENABLE, FALSE}, {D3DRS_ALPHATESTENABLE, FALSE}, {D3DRS_SRGBWRITEENABLE, FALSE}, {D3DRS_CULLMODE, D3DCULL_NONE}, {D3DRS_SCISSORTESTENABLE, FALSE}, {D3DRS_FOGENABLE, FALSE}, {D3DRS_CLIPPLANEENABLE, 0u}, {D3DRS_COLORWRITEENABLE, 0xFu}};
+    {D3DRS_ZENABLE, FALSE},
+    {D3DRS_ZWRITEENABLE, FALSE},
+    {D3DRS_STENCILENABLE, FALSE},
+    {D3DRS_ALPHABLENDENABLE, FALSE},
+    {D3DRS_ALPHATESTENABLE, FALSE},
+    {D3DRS_SRGBWRITEENABLE, FALSE},
+    {D3DRS_CULLMODE, D3DCULL_NONE},
+    {D3DRS_SCISSORTESTENABLE, FALSE},
+    {D3DRS_FOGENABLE, FALSE},
+    {D3DRS_CLIPPLANEENABLE, 0u},
+    {D3DRS_COLORWRITEENABLE, 0xFu},
+};
 // Point sampled and clamped, pixel for pixel.
 constexpr std::pair<D3DSAMPLERSTATETYPE, DWORD> SCENE_SCALE_SAMPLER_STATES[] = {
-    {D3DSAMP_MAGFILTER, D3DTEXF_POINT}, {D3DSAMP_MINFILTER, D3DTEXF_POINT}, {D3DSAMP_MIPFILTER, D3DTEXF_NONE}, {D3DSAMP_ADDRESSU, D3DTADDRESS_CLAMP}, {D3DSAMP_ADDRESSV, D3DTADDRESS_CLAMP}, {D3DSAMP_SRGBTEXTURE, FALSE}};
+    {D3DSAMP_MAGFILTER, D3DTEXF_POINT},
+    {D3DSAMP_MINFILTER, D3DTEXF_POINT},
+    {D3DSAMP_MIPFILTER, D3DTEXF_NONE},
+    {D3DSAMP_ADDRESSU, D3DTADDRESS_CLAMP},
+    {D3DSAMP_ADDRESSV, D3DTADDRESS_CLAMP},
+    {D3DSAMP_SRGBTEXTURE, FALSE},
+};
 
 void OnSceneDrawn(reshade::api::command_list* cmd_list) {
   scene_awaits_scale = true;
+}
+
+void OnCompositeDrawn(reshade::api::command_list* cmd_list) {
+  if (!night_vision_last_frame) {
+    scene_awaits_scale = true;
+  }
 }
 
 // Scales the finished scene, if one waits, on the render target the game draws the HUD to.
@@ -883,6 +920,7 @@ void ScaleScene(IDirect3DDevice9* native_device, const char* trigger) {
   };
   native_device->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP, 2, quad, sizeof(Vertex));
   RestoreReplacedDraw(&scene_scale_draw);
+  scene_scaled_this_frame = true;
 
   static std::vector<const char*> logged_triggers;
   if (std::ranges::find(logged_triggers, trigger) == logged_triggers.end()) {
@@ -892,8 +930,18 @@ void ScaleScene(IDirect3DDevice9* native_device, const char* trigger) {
   }
 }
 
+// The HUD shader also draws world sprites over the finished scene, light coronas among them, in a
+// screen blend (ONE, INVSRCCOLOR): those belong to the scene, are scaled with it, and don't finish it.
 bool OnHudDraw(reshade::api::command_list* cmd_list) {
-  ScaleScene(reinterpret_cast<IDirect3DDevice9*>(cmd_list->get_device()->get_native()), "the HUD (0x8F122047)");
+  auto* native_device = reinterpret_cast<IDirect3DDevice9*>(cmd_list->get_device()->get_native());
+  DWORD blend = FALSE;
+  DWORD source_blend = 0;
+  DWORD dest_blend = 0;
+  native_device->GetRenderState(D3DRS_ALPHABLENDENABLE, &blend);
+  native_device->GetRenderState(D3DRS_SRCBLEND, &source_blend);
+  native_device->GetRenderState(D3DRS_DESTBLEND, &dest_blend);
+  if (blend != FALSE && source_blend == D3DBLEND_ONE && dest_blend == D3DBLEND_INVSRCCOLOR) return true;
+  ScaleScene(native_device, "the HUD (0x8F122047)");
   return true;
 }
 
@@ -1087,6 +1135,8 @@ void OnPresent(reshade::api::command_queue* queue, reshade::api::swapchain* swap
   }
   ReleaseEmfLevels();
   emf_image_drawn = false;
+  scene_scaled_this_frame = false;
+  night_vision_last_frame = std::exchange(night_vision_this_frame, false);
 
   // Orphaned back buffer clone: the game keeps drawing into the proxy's first clone of
   // the back buffer after the proxy replaced it. The full-size RGBA16F target it last bound, if it
@@ -1198,9 +1248,10 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved) {
           .on_draw = &OnEmfWarpDraw,
           .on_drawn = &OnEmfWarpDrawn,
       };
-      // The scene scale: the composite and thermal's colour ramp finish a scene (night vision's and
-      // EMF's image draws mark it in their own hooks), and the HUD's first draw scales it.
-      custom_shaders[0x83A4F799u].on_drawn = &OnSceneDrawn;
+      // The scene scale: the composite (unless night vision is on) and thermal's colour ramp finish a
+      // scene (night vision's and EMF's image draws mark it in their own hooks), and the HUD's first
+      // draw that isn't a world sprite scales it.
+      custom_shaders[0x83A4F799u].on_drawn = &OnCompositeDrawn;
       custom_shaders[0xC294F957u] = {
           .crc32 = 0xC294F957u,
           .on_drawn = &OnSceneDrawn,
