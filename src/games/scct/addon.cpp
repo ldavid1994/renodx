@@ -448,6 +448,7 @@ void OnInitSwapchain(reshade::api::swapchain* swapchain, bool resize) {
 }
 
 // The render target the game last bound, kept across presents, for the orphaned clone in OnPresent.
+// Forgotten when the swap chain or device goes away, as a reset frees the game's render targets.
 reshade::api::resource_view last_render_target = {0u};
 
 // ---------------------------------------------------------------------------
@@ -567,7 +568,8 @@ bool OnNightVisionImageDraw(reshade::api::command_list* cmd_list) {
 
   NightVisionConstants constants = {
       .glow_sizes = {1.f, 1.f, 1.f, 1.f},
-      .peak_ratio = shader_injection.peak_white_nits / (std::max)(shader_injection.diffuse_white_nits, 1.f),
+      .peak_ratio = shader_injection.peak_white_nits / (std::max)(shader_injection.graphics_white_nits, 1.f),
+      .gamma_correction = shader_injection.gamma_correction,
   };
   for (size_t index = 0; index < std::size(NIGHT_VISION_GLOW_STAGES); ++index) {
     IDirect3DBaseTexture9* glow = nullptr;
@@ -657,7 +659,8 @@ bool OnEmfImageDraw(reshade::api::command_list* cmd_list) {
   }
 
   EmfConstants constants = {
-      .peak_ratio = shader_injection.peak_white_nits / (std::max)(shader_injection.diffuse_white_nits, 1.f),
+      .peak_ratio = shader_injection.peak_white_nits / (std::max)(shader_injection.graphics_white_nits, 1.f),
+      .gamma_correction = shader_injection.gamma_correction,
   };
   for (size_t index = 0; index < std::size(EMF_BUMP_MATRIX_STATES); ++index) {
     DWORD entry = 0;
@@ -777,6 +780,7 @@ void OnEmfWarpDrawn(reshade::api::command_list* cmd_list) {
 
 void OnDestroySwapchain(reshade::api::swapchain* swapchain, bool resize) {
   if (swapchain->get_device()->get_api() != reshade::api::device_api::d3d9) return;
+  last_render_target = {0u};
   ReleaseEmfLevels();
   ReleaseEmfWarpCopy();
   for (auto* draw : REPLACED_DRAWS) {

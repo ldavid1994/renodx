@@ -1,11 +1,9 @@
-// Shared by Night Vision HDR and EMF HDR: light past white added to a vision pass's gamma-encoded
-// image, worked out in linear light, eased in, rolled off toward Peak and dithered.
+// Shared by Night Vision HDR and EMF HDR: light past white added to a vision pass's encoded image,
+// worked out in linear light, eased in, rolled off toward Peak and dithered.
 
 #ifndef SRC_GAMES_SCCT_VISION_HDR_HLSLI_
 #define SRC_GAMES_SCCT_VISION_HDR_HLSLI_
 
-// The image is gamma-encoded; the excess and its limit are worked out in linear light.
-static const float GAMMA = 2.2f;
 // The excess eases in over this much either side of white (linear), so its onset has no crease.
 static const float EXCESS_KNEE = 0.25f;
 // R2 low-discrepancy dither (Roberts) over the pixel position against HDR10 banding: peak to peak
@@ -34,11 +32,18 @@ float4 CubicSample(sampler2D glow, float2 texcoord, float2 size) {
               first_weight.y);
 }
 
-// The light (linear, in units of white) that a gamma-encoded peak puts past white: eased in with a
+// The game's encoded image in linear light, decoded as the swap chain decodes it (Gamma Correction:
+// sRGB or 2.2), so the light past white lands where the display shows it and Peak holds.
+float3 DecodeVision(float3 encoded) {
+  if (CUSTOM_VISION_GAMMA_CORRECTION > 0.f) return pow(max(0.f, encoded), 2.2f);
+  return renodx::color::srgb::DecodeSafe(encoded);
+}
+
+// The light (linear, in units of white) that an encoded peak puts past white: eased in with a
 // soft knee, then at most what Peak leaves above white. x / (1 + x / limit) approaches that limit
 // without reaching it, so the light rolls off toward Peak instead of clipping flat there.
 float RolledOffExcess(float peak, float peak_ratio) {
-  const float past_white = pow(max(0.f, peak), GAMMA) - 1.f;
+  const float past_white = DecodeVision(max(0.f, peak).xxx).x - 1.f;
   float excess = max(0.f, past_white);
   if (abs(past_white) < EXCESS_KNEE) {
     excess = (past_white + EXCESS_KNEE) * (past_white + EXCESS_KNEE) / (4.f * EXCESS_KNEE);
@@ -51,11 +56,12 @@ float RolledOffExcess(float peak, float peak_ratio) {
 // keeps the hue the game clips to, dithered as the layer grows.
 float3 AddLight(float3 color, float added, float2 pixel_position) {
   const float image_peak = max(color.r, max(color.g, color.b));
-  const float3 image_white = pow(color / max(image_peak, 1e-4f), GAMMA);
+  const float3 image_white = DecodeVision(color / max(image_peak, 1e-4f));
   const float dither = frac(dot(pixel_position, DITHER_PATTERN)) - 0.5f;
-  const float3 linear_color = (pow(color, GAMMA) + added * image_white)
+  const float3 linear_color = (DecodeVision(color) + added * image_white)
                               * (1.f + dither * DITHER_STRENGTH * saturate(added * DITHER_ONSET));
-  return pow(max(0.f, linear_color), 1.f / GAMMA);
+  if (CUSTOM_VISION_GAMMA_CORRECTION > 0.f) return pow(max(0.f, linear_color), 1.f / 2.2f);
+  return renodx::color::srgb::EncodeSafe(max(0.f, linear_color));
 }
 
 #endif  // SRC_GAMES_SCCT_VISION_HDR_HLSLI_

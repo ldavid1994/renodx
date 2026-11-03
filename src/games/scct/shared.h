@@ -43,16 +43,20 @@ struct ShaderInjectData {
 // Night Vision HDR's and EMF HDR's constants from c8, in float4 registers as the add-on uploads
 // them. The shaders read them through vision_settings below: HLSL would lay these arrays out one
 // element per register.
+// The vision images are the game's encoded output, shown with white at UI Brightness: Peak is in
+// those units, and they are decoded as the swap chain decodes them (Gamma Correction).
 struct NightVisionConstants {
-  float glow_sizes[4];  // in texels, xy: s1, zw: s2
-  float peak_ratio;     // Peak over Game Brightness
-  float padding0[3];
+  float glow_sizes[4];     // in texels, xy: s1, zw: s2
+  float peak_ratio;        // Peak over UI Brightness
+  float gamma_correction;  // 0 = sRGB, 1 = 2.2
+  float padding0[2];
 };
 
 struct EmfConstants {
-  float bump_matrix[4];  // BUMPENVMAT00, 01, 10, 11 of stage 3
-  float peak_ratio;      // Peak over Game Brightness
-  float padding0[3];
+  float bump_matrix[4];    // BUMPENVMAT00, 01, 10, 11 of stage 3
+  float peak_ratio;        // Peak over UI Brightness
+  float gamma_correction;  // 0 = sRGB, 1 = 2.2
+  float padding0[2];
   float level_sizes[4];  // in texels, per level (square)
 };
 
@@ -84,7 +88,8 @@ float4 vision_settings[3] : register(c8);
 
 #define CUSTOM_NIGHT_VISION_GLOW_SIZES vision_settings[0]    // in texels, xy: s1, zw: s2
 #define CUSTOM_EMF_BUMP_MATRIX         vision_settings[0]    // BUMPENVMAT00, 01, 10, 11 of stage 3
-#define CUSTOM_VISION_PEAK_RATIO       vision_settings[1].x  // Peak over Game Brightness
+#define CUSTOM_VISION_PEAK_RATIO       vision_settings[1].x  // Peak over UI Brightness
+#define CUSTOM_VISION_GAMMA_CORRECTION vision_settings[1].y  // 0 = sRGB, 1 = 2.2
 #define CUSTOM_EMF_LEVEL_SIZES         vision_settings[2]    // in texels, per level (square)
 
 #else
