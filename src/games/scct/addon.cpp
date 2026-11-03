@@ -449,13 +449,102 @@ void OnInitSwapchain(reshade::api::swapchain* swapchain, bool resize) {
 reshade::api::resource_view last_render_target = {0u};
 
 // ---------------------------------------------------------------------------
+// Replaced draws: game draws that run with the add-on's own shaders (night vision's image, EMF's
+// image and EMF's warp). D3D9 state stays set for later draws, so the game's values of the state a
+// replaced draw sets are put back once it has drawn. A state block recorded from that draw's own
+// binds holds exactly that state: it captures the game's values before the draw and applies them
+// after it. The block holds references to what it captured, game textures in D3DPOOL_DEFAULT among
+// them, so it is released before a device reset (OnDestroySwapchain) and recorded again after it.
+// ---------------------------------------------------------------------------
+
+struct ReplacedDraw {
+  IDirect3DDevice9* device = nullptr;
+  IDirect3DVertexShader9* vertex_shader = nullptr;  // null keeps the game's vertex shader
+  IDirect3DPixelShader9* pixel_shader = nullptr;
+  IDirect3DStateBlock9* game_state = nullptr;
+  bool replaced = false;  // the draw runs with the add-on's state, to be put back once it has drawn
+};
+ReplacedDraw night_vision_draw;
+ReplacedDraw emf_image_draw;
+ReplacedDraw emf_warp_draw;
+constexpr ReplacedDraw* REPLACED_DRAWS[] = {&night_vision_draw, &emf_image_draw, &emf_warp_draw};
+
+void ReleaseReplacedDraw(ReplacedDraw* draw) {
+  if (draw->vertex_shader != nullptr) {
+    draw->vertex_shader->Release();
+  }
+  if (draw->pixel_shader != nullptr) {
+    draw->pixel_shader->Release();
+  }
+  if (draw->game_state != nullptr) {
+    draw->game_state->Release();
+  }
+  *draw = {};
+}
+
+// Returns whether the draw's shaders exist on this device; an empty vertex shader keeps the game's.
+// A failed creation is kept, so it isn't retried every frame on the same device.
+bool CreateReplacedDraw(IDirect3DDevice9* native_device, std::span<const std::uint8_t> vertex_shader,
+                        std::span<const std::uint8_t> pixel_shader, const char* name, ReplacedDraw* draw) {
+  if (draw->device != native_device) {
+    ReleaseReplacedDraw(draw);
+    draw->device = native_device;
+    // The pixel shader is only created once the vertex shader exists (or the game's is kept).
+    const bool vertex_shader_ready =
+        vertex_shader.empty()
+        || SUCCEEDED(native_device->CreateVertexShader(reinterpret_cast<const DWORD*>(vertex_shader.data()),
+                                                       &draw->vertex_shader));
+    const bool shaders_ready =
+        vertex_shader_ready
+        && SUCCEEDED(native_device->CreatePixelShader(reinterpret_cast<const DWORD*>(pixel_shader.data()),
+                                                      &draw->pixel_shader));
+    if (!shaders_ready) {
+      reshade::log::message(reshade::log::level::warning, (std::string("[scct] ") + name + ": could not create its shaders").c_str());
+      ReleaseReplacedDraw(draw);
+      draw->device = native_device;
+    }
+  }
+  return draw->pixel_shader != nullptr;
+}
+
+// Sets the add-on's state for the draw with bind, after capturing the game's values of it. On the
+// first draw on a device (or after a reset) bind is first recorded into the state block, which only
+// stores the calls; it must set the same states on every draw. If recording fails, the draw is left
+// to the game's shaders on this device, as when its shaders can't be created.
+template <typename Bind>
+void ReplaceDraw(IDirect3DDevice9* native_device, const Bind& bind, ReplacedDraw* draw) {
+  if (draw->game_state == nullptr) {
+    if (FAILED(native_device->BeginStateBlock())) return;
+    bind();
+    if (FAILED(native_device->EndStateBlock(&draw->game_state))) {
+      reshade::log::message(reshade::log::level::warning, "[scct] could not record a replaced draw's state block");
+      ReleaseReplacedDraw(draw);
+      draw->device = native_device;
+      return;
+    }
+  }
+  // Still replaced when the last draw's restore never ran: the device holds the add-on's state, and
+  // the block still holds the game's.
+  if (!draw->replaced) {
+    draw->game_state->Capture();
+  }
+  bind();
+  draw->replaced = true;
+}
+
+void RestoreReplacedDraw(ReplacedDraw* draw) {
+  if (!draw->replaced) return;
+  draw->game_state->Apply();
+  draw->replaced = false;
+}
+
+// ---------------------------------------------------------------------------
 // Night Vision HDR. Night vision is built from the composite's 8-bit copy and clamped at
-// every step, so it stays at or below white. With the toggle on, its image draw (0x4ADA0B05) runs
-// with night_vision_hdr_pixel_shader instead, which raises what it clipped (see the shader). That
-// is a ps_3_0, which only runs with a vs_3_0, so the draw also gets night_vision_vertex_shader, a
-// port of the game's. The game's shaders, c8-c9 and the glows' filters are put back once it has
-// drawn: D3D9 state stays set for later draws. With the toggle off, or if the shaders can't be
-// created, the game's own shaders draw it.
+// every step, so it stays at or below white. With the toggle on, its image draw (0x4ADA0B05) is a
+// replaced draw with night_vision_hdr_pixel_shader, which raises what it clipped (see the shader).
+// That is a ps_3_0, which only runs with a vs_3_0, so the draw also gets night_vision_vertex_shader,
+// a port of the game's. With the toggle off, or if the shaders can't be created, the game's own
+// shaders draw it.
 // ---------------------------------------------------------------------------
 
 // Night vision's and EMF's ps_3_0 read their constants from c8 (vision_settings in shared.h).
@@ -466,127 +555,58 @@ constexpr UINT NIGHT_VISION_CONSTANT_REGISTER_COUNT = sizeof(NightVisionConstant
 // The glows the shader upsamples; its cubic upsampling is built on bilinear taps.
 constexpr DWORD NIGHT_VISION_GLOW_STAGES[] = {1, 2};
 
-// A vision draw's own vs_3_0 and ps_3_0, created once per D3D9 device.
-struct VisionShaders {
-  IDirect3DDevice9* device = nullptr;
-  IDirect3DVertexShader9* vertex_shader = nullptr;
-  IDirect3DPixelShader9* pixel_shader = nullptr;
-};
-VisionShaders night_vision_shaders;
-VisionShaders emf_shaders;
-
-void ReleaseVisionShaders(VisionShaders* shaders) {
-  if (shaders->vertex_shader != nullptr) {
-    shaders->vertex_shader->Release();
-  }
-  if (shaders->pixel_shader != nullptr) {
-    shaders->pixel_shader->Release();
-  }
-  *shaders = {};
-}
-
-// Returns whether the shaders exist on this device. A failed creation is kept, so it isn't retried
-// every frame on the same device.
-bool CreateVisionShaders(IDirect3DDevice9* native_device, std::span<const std::uint8_t> vertex_shader,
-                         std::span<const std::uint8_t> pixel_shader, const char* name, VisionShaders* shaders) {
-  if (shaders->device != native_device) {
-    ReleaseVisionShaders(shaders);
-    shaders->device = native_device;
-    if (FAILED(native_device->CreateVertexShader(reinterpret_cast<const DWORD*>(vertex_shader.data()), &shaders->vertex_shader))
-        || FAILED(native_device->CreatePixelShader(reinterpret_cast<const DWORD*>(pixel_shader.data()), &shaders->pixel_shader))) {
-      reshade::log::message(reshade::log::level::warning, (std::string("[scct] ") + name + ": could not create its shaders").c_str());
-      ReleaseVisionShaders(shaders);
-      shaders->device = native_device;
-    }
-  }
-  return shaders->pixel_shader != nullptr;
-}
-
-struct NightVisionGlowFilters {
-  DWORD mag_filter = 0;
-  DWORD min_filter = 0;
-};
-
-struct NightVisionSavedState {
-  bool has_saved_state = false;
-  IDirect3DVertexShader9* vertex_shader = nullptr;
-  IDirect3DPixelShader9* pixel_shader = nullptr;
-  NightVisionConstants constants = {};
-  NightVisionGlowFilters glow_filters[std::size(NIGHT_VISION_GLOW_STAGES)];
-};
-NightVisionSavedState night_vision_saved_state;
-
 bool OnNightVisionImageDraw(reshade::api::command_list* cmd_list) {
   if (night_vision_hdr == 0.f || !IsHDR()) return true;
   auto* native_device = reinterpret_cast<IDirect3DDevice9*>(cmd_list->get_device()->get_native());
-  if (!CreateVisionShaders(native_device, __night_vision_vertex_shader, __night_vision_hdr_pixel_shader,
-                           "Night Vision HDR", &night_vision_shaders)) {
+  if (!CreateReplacedDraw(native_device, __night_vision_vertex_shader, __night_vision_hdr_pixel_shader,
+                          "Night Vision HDR", &night_vision_draw)) {
     return true;
   }
 
-  auto& saved = night_vision_saved_state;
-  native_device->GetVertexShader(&saved.vertex_shader);
-  native_device->GetPixelShader(&saved.pixel_shader);
-  native_device->GetPixelShaderConstantF(VISION_FIRST_CONSTANT_REGISTER, reinterpret_cast<float*>(&saved.constants),
-                                         NIGHT_VISION_CONSTANT_REGISTER_COUNT);
   NightVisionConstants constants = {
       .glow_sizes = {1.f, 1.f, 1.f, 1.f},
       .peak_ratio = shader_injection.peak_white_nits / (std::max)(shader_injection.diffuse_white_nits, 1.f),
   };
   for (size_t index = 0; index < std::size(NIGHT_VISION_GLOW_STAGES); ++index) {
-    const DWORD stage = NIGHT_VISION_GLOW_STAGES[index];
-    native_device->GetSamplerState(stage, D3DSAMP_MAGFILTER, &saved.glow_filters[index].mag_filter);
-    native_device->GetSamplerState(stage, D3DSAMP_MINFILTER, &saved.glow_filters[index].min_filter);
-    native_device->SetSamplerState(stage, D3DSAMP_MAGFILTER, D3DTEXF_LINEAR);
-    native_device->SetSamplerState(stage, D3DSAMP_MINFILTER, D3DTEXF_LINEAR);
     IDirect3DBaseTexture9* glow = nullptr;
-    if (SUCCEEDED(native_device->GetTexture(stage, &glow)) && glow != nullptr) {
+    if (SUCCEEDED(native_device->GetTexture(NIGHT_VISION_GLOW_STAGES[index], &glow)) && glow != nullptr) {
       D3DSURFACE_DESC glow_desc = {};
-      if (glow->GetType() == D3DRTYPE_TEXTURE && SUCCEEDED(static_cast<IDirect3DTexture9*>(glow)->GetLevelDesc(0, &glow_desc))) {
+      if (glow->GetType() == D3DRTYPE_TEXTURE
+          && SUCCEEDED(static_cast<IDirect3DTexture9*>(glow)->GetLevelDesc(0, &glow_desc))) {
         constants.glow_sizes[2 * index] = static_cast<float>(glow_desc.Width);
         constants.glow_sizes[(2 * index) + 1] = static_cast<float>(glow_desc.Height);
       }
       glow->Release();
     }
   }
-  native_device->SetPixelShaderConstantF(VISION_FIRST_CONSTANT_REGISTER, reinterpret_cast<const float*>(&constants),
-                                         NIGHT_VISION_CONSTANT_REGISTER_COUNT);
-  native_device->SetVertexShader(night_vision_shaders.vertex_shader);
-  native_device->SetPixelShader(night_vision_shaders.pixel_shader);
-  saved.has_saved_state = true;
+  ReplaceDraw(
+      native_device,
+      [&]() {
+        for (const DWORD stage : NIGHT_VISION_GLOW_STAGES) {
+          native_device->SetSamplerState(stage, D3DSAMP_MAGFILTER, D3DTEXF_LINEAR);
+          native_device->SetSamplerState(stage, D3DSAMP_MINFILTER, D3DTEXF_LINEAR);
+        }
+        native_device->SetPixelShaderConstantF(VISION_FIRST_CONSTANT_REGISTER,
+                                               reinterpret_cast<const float*>(&constants),
+                                               NIGHT_VISION_CONSTANT_REGISTER_COUNT);
+        native_device->SetVertexShader(night_vision_draw.vertex_shader);
+        native_device->SetPixelShader(night_vision_draw.pixel_shader);
+      },
+      &night_vision_draw);
   return true;
 }
 
 void OnNightVisionImageDrawn(reshade::api::command_list* cmd_list) {
-  auto& saved = night_vision_saved_state;
-  if (!saved.has_saved_state) return;
-  auto* native_device = reinterpret_cast<IDirect3DDevice9*>(cmd_list->get_device()->get_native());
-  native_device->SetVertexShader(saved.vertex_shader);
-  native_device->SetPixelShader(saved.pixel_shader);
-  if (saved.vertex_shader != nullptr) {
-    saved.vertex_shader->Release();
-  }
-  if (saved.pixel_shader != nullptr) {
-    saved.pixel_shader->Release();
-  }
-  native_device->SetPixelShaderConstantF(VISION_FIRST_CONSTANT_REGISTER, reinterpret_cast<const float*>(&saved.constants),
-                                         NIGHT_VISION_CONSTANT_REGISTER_COUNT);
-  for (size_t index = 0; index < std::size(NIGHT_VISION_GLOW_STAGES); ++index) {
-    const DWORD stage = NIGHT_VISION_GLOW_STAGES[index];
-    native_device->SetSamplerState(stage, D3DSAMP_MAGFILTER, saved.glow_filters[index].mag_filter);
-    native_device->SetSamplerState(stage, D3DSAMP_MINFILTER, saved.glow_filters[index].min_filter);
-  }
-  night_vision_saved_state = {};
+  RestoreReplacedDraw(&night_vision_draw);
 }
 
 // ---------------------------------------------------------------------------
 // EMF HDR. EMF's image is the game's 8-bit, 256-texel weighted sum of its glow levels
 // (0xCDFC48BC), so it clips at white. With the toggle on, the draw that shows it (0x7CE55E3E,
-// texbem) runs with emf_hdr_pixel_shader and emf_vertex_shader instead, which sum the levels again
-// without the clip and add what went past white. The levels are the textures the sum drew from,
-// held with a reference until the next present (or a swap chain or device teardown), so a level the
-// game recreates in between is never bound freed. The game's shaders, c8-c10 and stages 4-7 are put
-// back once it has drawn.
+// texbem) is a replaced draw with emf_hdr_pixel_shader and emf_vertex_shader, which sum the levels
+// again without the clip and add what went past white. The levels are the textures the sum drew
+// from, held with a reference until the next present (or a swap chain or device teardown), so a
+// level the game recreates in between is never bound freed.
 // ---------------------------------------------------------------------------
 
 static_assert(sizeof(EmfConstants) % (4 * sizeof(float)) == 0,
@@ -602,20 +622,6 @@ constexpr DWORD EMF_LEVEL_SAMPLER_VALUES[] = {D3DTEXF_LINEAR, D3DTEXF_LINEAR, D3
 
 IDirect3DBaseTexture9* emf_levels[EMF_LEVEL_COUNT] = {};
 bool emf_image_drawn = false;  // EMF HDR has drawn this frame's image
-
-struct EmfLevelStage {
-  IDirect3DBaseTexture9* texture = nullptr;
-  DWORD sampler_values[std::size(EMF_LEVEL_SAMPLER_STATES)] = {};
-};
-
-struct EmfSavedState {
-  bool has_saved_state = false;
-  IDirect3DVertexShader9* vertex_shader = nullptr;
-  IDirect3DPixelShader9* pixel_shader = nullptr;
-  EmfConstants constants = {};
-  EmfLevelStage level_stages[EMF_LEVEL_COUNT];
-};
-EmfSavedState emf_saved_state;
 
 void ReleaseEmfLevels() {
   for (auto*& level : emf_levels) {
@@ -641,15 +647,10 @@ bool OnEmfImageDraw(reshade::api::command_list* cmd_list) {
   if (emf_hdr == 0.f || !IsHDR()) return true;
   if (std::ranges::find(emf_levels, nullptr) != std::end(emf_levels)) return true;
   auto* native_device = reinterpret_cast<IDirect3DDevice9*>(cmd_list->get_device()->get_native());
-  if (!CreateVisionShaders(native_device, __emf_vertex_shader, __emf_hdr_pixel_shader, "EMF HDR", &emf_shaders)) {
+  if (!CreateReplacedDraw(native_device, __emf_vertex_shader, __emf_hdr_pixel_shader, "EMF HDR", &emf_image_draw)) {
     return true;
   }
 
-  auto& saved = emf_saved_state;
-  native_device->GetVertexShader(&saved.vertex_shader);
-  native_device->GetPixelShader(&saved.pixel_shader);
-  native_device->GetPixelShaderConstantF(VISION_FIRST_CONSTANT_REGISTER, reinterpret_cast<float*>(&saved.constants),
-                                         EMF_CONSTANT_REGISTER_COUNT);
   EmfConstants constants = {
       .peak_ratio = shader_injection.peak_white_nits / (std::max)(shader_injection.diffuse_white_nits, 1.f),
   };
@@ -661,93 +662,63 @@ bool OnEmfImageDraw(reshade::api::command_list* cmd_list) {
     constants.bump_matrix[index] = std::bit_cast<float>(entry);
   }
   for (DWORD level = 0; level < EMF_LEVEL_COUNT; ++level) {
-    const DWORD stage = EMF_FIRST_LEVEL_STAGE + level;
-    auto& level_stage = saved.level_stages[level];
-    native_device->GetTexture(stage, &level_stage.texture);
-    for (size_t index = 0; index < std::size(EMF_LEVEL_SAMPLER_STATES); ++index) {
-      native_device->GetSamplerState(stage, EMF_LEVEL_SAMPLER_STATES[index], &level_stage.sampler_values[index]);
-      native_device->SetSamplerState(stage, EMF_LEVEL_SAMPLER_STATES[index], EMF_LEVEL_SAMPLER_VALUES[index]);
-    }
-    native_device->SetTexture(stage, emf_levels[level]);
     D3DSURFACE_DESC level_desc = {};
     if (emf_levels[level]->GetType() == D3DRTYPE_TEXTURE
         && SUCCEEDED(static_cast<IDirect3DTexture9*>(emf_levels[level])->GetLevelDesc(0, &level_desc))) {
       constants.level_sizes[level] = static_cast<float>(level_desc.Width);
     }
   }
-  native_device->SetPixelShaderConstantF(VISION_FIRST_CONSTANT_REGISTER, reinterpret_cast<const float*>(&constants),
-                                         EMF_CONSTANT_REGISTER_COUNT);
-  native_device->SetVertexShader(emf_shaders.vertex_shader);
-  native_device->SetPixelShader(emf_shaders.pixel_shader);
-  saved.has_saved_state = true;
+  ReplaceDraw(
+      native_device,
+      [&]() {
+        for (DWORD level = 0; level < EMF_LEVEL_COUNT; ++level) {
+          const DWORD stage = EMF_FIRST_LEVEL_STAGE + level;
+          for (size_t index = 0; index < std::size(EMF_LEVEL_SAMPLER_STATES); ++index) {
+            native_device->SetSamplerState(stage, EMF_LEVEL_SAMPLER_STATES[index], EMF_LEVEL_SAMPLER_VALUES[index]);
+          }
+          native_device->SetTexture(stage, emf_levels[level]);
+        }
+        native_device->SetPixelShaderConstantF(VISION_FIRST_CONSTANT_REGISTER,
+                                               reinterpret_cast<const float*>(&constants),
+                                               EMF_CONSTANT_REGISTER_COUNT);
+        native_device->SetVertexShader(emf_image_draw.vertex_shader);
+        native_device->SetPixelShader(emf_image_draw.pixel_shader);
+      },
+      &emf_image_draw);
   return true;
 }
 
 void OnEmfImageDrawn(reshade::api::command_list* cmd_list) {
-  auto& saved = emf_saved_state;
-  if (!saved.has_saved_state) return;
-  auto* native_device = reinterpret_cast<IDirect3DDevice9*>(cmd_list->get_device()->get_native());
-  native_device->SetVertexShader(saved.vertex_shader);
-  native_device->SetPixelShader(saved.pixel_shader);
-  if (saved.vertex_shader != nullptr) {
-    saved.vertex_shader->Release();
+  if (emf_image_draw.replaced) {
+    emf_image_drawn = true;
   }
-  if (saved.pixel_shader != nullptr) {
-    saved.pixel_shader->Release();
-  }
-  native_device->SetPixelShaderConstantF(VISION_FIRST_CONSTANT_REGISTER, reinterpret_cast<const float*>(&saved.constants),
-                                         EMF_CONSTANT_REGISTER_COUNT);
-  for (DWORD level = 0; level < EMF_LEVEL_COUNT; ++level) {
-    const DWORD stage = EMF_FIRST_LEVEL_STAGE + level;
-    const auto& level_stage = saved.level_stages[level];
-    native_device->SetTexture(stage, level_stage.texture);
-    if (level_stage.texture != nullptr) {
-      level_stage.texture->Release();
-    }
-    for (size_t index = 0; index < std::size(EMF_LEVEL_SAMPLER_STATES); ++index) {
-      native_device->SetSamplerState(stage, EMF_LEVEL_SAMPLER_STATES[index], level_stage.sampler_values[index]);
-    }
-  }
-  emf_saved_state = {};
-  emf_image_drawn = true;
+  RestoreReplacedDraw(&emf_image_draw);
 }
 
 // After EMF's image, the game copies the screen to an 8-bit texture and draws it back through a
 // grid that warps it (0x2E3398C1), which would clip it at white again. Once EMF HDR has drawn the
-// image, that draw reads a 16-bit copy of the screen instead, with emf_warp_pixel_shader. The copy
-// is in D3DPOOL_DEFAULT, so it is released before a device reset (OnDestroySwapchain).
-struct EmfWarp {
-  IDirect3DDevice9* device = nullptr;
-  IDirect3DPixelShader9* pixel_shader = nullptr;
-  IDirect3DTexture9* screen_copy = nullptr;
-};
-EmfWarp emf_warp;
-
-struct EmfWarpSavedState {
-  bool has_saved_state = false;
-  IDirect3DPixelShader9* pixel_shader = nullptr;
-  IDirect3DBaseTexture9* screen = nullptr;
-};
-EmfWarpSavedState emf_warp_saved_state;
+// image, that draw is a replaced draw that reads a 16-bit copy of the screen instead, with
+// emf_warp_pixel_shader and the game's vertex shader. The copy is in D3DPOOL_DEFAULT, so it is
+// released before a device reset (OnDestroySwapchain).
+IDirect3DTexture9* emf_warp_screen_copy = nullptr;
 
 void ReleaseEmfWarpCopy() {
-  if (emf_warp.screen_copy != nullptr) {
-    emf_warp.screen_copy->Release();
-    emf_warp.screen_copy = nullptr;
+  if (emf_warp_screen_copy != nullptr) {
+    emf_warp_screen_copy->Release();
+    emf_warp_screen_copy = nullptr;
   }
-}
-
-void ReleaseEmfWarp() {
-  ReleaseEmfWarpCopy();
-  if (emf_warp.pixel_shader != nullptr) {
-    emf_warp.pixel_shader->Release();
-  }
-  emf_warp = {};
 }
 
 bool OnEmfWarpDraw(reshade::api::command_list* cmd_list) {
   if (!emf_image_drawn) return true;
   auto* native_device = reinterpret_cast<IDirect3DDevice9*>(cmd_list->get_device()->get_native());
+  if (emf_warp_draw.device != native_device) {
+    // The copy belongs to the old device.
+    ReleaseEmfWarpCopy();
+  }
+  if (!CreateReplacedDraw(native_device, {}, __emf_warp_pixel_shader, "EMF HDR warp", &emf_warp_draw)) {
+    return true;
+  }
   IDirect3DSurface9* render_target = nullptr;
   if (FAILED(native_device->GetRenderTarget(0, &render_target)) || render_target == nullptr) return true;
   D3DSURFACE_DESC target_desc = {};
@@ -759,36 +730,27 @@ bool OnEmfWarpDraw(reshade::api::command_list* cmd_list) {
   const bool is_screen_redraw = screen != nullptr && screen->GetType() == D3DRTYPE_TEXTURE
                                 && SUCCEEDED(static_cast<IDirect3DTexture9*>(screen)->GetLevelDesc(0, &screen_desc))
                                 && screen_desc.Width == target_desc.Width && screen_desc.Height == target_desc.Height;
-  if (emf_warp.device != native_device) {
-    ReleaseEmfWarp();
-    emf_warp.device = native_device;
-    if (FAILED(native_device->CreatePixelShader(reinterpret_cast<const DWORD*>(__emf_warp_pixel_shader.data()),
-                                                &emf_warp.pixel_shader))) {
-      reshade::log::message(reshade::log::level::warning, "[scct] EMF HDR: could not create the warp shader");
-      emf_warp.pixel_shader = nullptr;
-    }
+  if (screen != nullptr) {
+    screen->Release();
   }
-  if (emf_warp.screen_copy != nullptr) {
+  if (emf_warp_screen_copy != nullptr) {
     D3DSURFACE_DESC copy_desc = {};
-    emf_warp.screen_copy->GetLevelDesc(0, &copy_desc);
+    emf_warp_screen_copy->GetLevelDesc(0, &copy_desc);
     if (copy_desc.Width != target_desc.Width || copy_desc.Height != target_desc.Height) {
       ReleaseEmfWarpCopy();
     }
   }
-  if (is_screen_redraw && emf_warp.pixel_shader != nullptr && emf_warp.screen_copy == nullptr
+  if (is_screen_redraw && emf_warp_screen_copy == nullptr
       && FAILED(native_device->CreateTexture(target_desc.Width, target_desc.Height, 1, D3DUSAGE_RENDERTARGET,
-                                             D3DFMT_A16B16G16R16F, D3DPOOL_DEFAULT, &emf_warp.screen_copy, nullptr))) {
+                                             D3DFMT_A16B16G16R16F, D3DPOOL_DEFAULT, &emf_warp_screen_copy, nullptr))) {
     reshade::log::message(reshade::log::level::warning, "[scct] EMF HDR: could not create the screen copy");
-    emf_warp.screen_copy = nullptr;
+    emf_warp_screen_copy = nullptr;
   }
   IDirect3DSurface9* copy_surface = nullptr;
-  if (is_screen_redraw && emf_warp.screen_copy != nullptr) {
-    emf_warp.screen_copy->GetSurfaceLevel(0, &copy_surface);
+  if (is_screen_redraw && emf_warp_screen_copy != nullptr) {
+    emf_warp_screen_copy->GetSurfaceLevel(0, &copy_surface);
   }
   if (copy_surface == nullptr) {
-    if (screen != nullptr) {
-      screen->Release();
-    }
     render_target->Release();
     return true;
   }
@@ -796,32 +758,31 @@ bool OnEmfWarpDraw(reshade::api::command_list* cmd_list) {
   copy_surface->Release();
   render_target->Release();
 
-  auto& saved = emf_warp_saved_state;
-  native_device->GetPixelShader(&saved.pixel_shader);
-  saved.screen = screen;
-  native_device->SetTexture(0, emf_warp.screen_copy);
-  native_device->SetPixelShader(emf_warp.pixel_shader);
-  saved.has_saved_state = true;
+  ReplaceDraw(
+      native_device,
+      [&]() {
+        native_device->SetTexture(0, emf_warp_screen_copy);
+        native_device->SetPixelShader(emf_warp_draw.pixel_shader);
+      },
+      &emf_warp_draw);
   return true;
 }
 
 void OnEmfWarpDrawn(reshade::api::command_list* cmd_list) {
-  auto& saved = emf_warp_saved_state;
-  if (!saved.has_saved_state) return;
-  auto* native_device = reinterpret_cast<IDirect3DDevice9*>(cmd_list->get_device()->get_native());
-  native_device->SetPixelShader(saved.pixel_shader);
-  native_device->SetTexture(0, saved.screen);
-  if (saved.pixel_shader != nullptr) {
-    saved.pixel_shader->Release();
-  }
-  saved.screen->Release();
-  emf_warp_saved_state = {};
+  RestoreReplacedDraw(&emf_warp_draw);
 }
 
 void OnDestroySwapchain(reshade::api::swapchain* swapchain, bool resize) {
   if (swapchain->get_device()->get_api() != reshade::api::device_api::d3d9) return;
   ReleaseEmfLevels();
   ReleaseEmfWarpCopy();
+  for (auto* draw : REPLACED_DRAWS) {
+    if (draw->game_state != nullptr) {
+      draw->game_state->Release();
+      draw->game_state = nullptr;
+    }
+    draw->replaced = false;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -851,13 +812,14 @@ void OnDestroyDevice(reshade::api::device* device) {
   if (device->get_api() != reshade::api::device_api::d3d9) return;
   last_render_target = {0u};
   ReleaseEmfLevels();
-  for (auto* shaders : {&night_vision_shaders, &emf_shaders}) {
-    if (shaders->device == reinterpret_cast<IDirect3DDevice9*>(device->get_native())) {
-      ReleaseVisionShaders(shaders);
-    }
+  auto* native_device = reinterpret_cast<IDirect3DDevice9*>(device->get_native());
+  if (emf_warp_draw.device == native_device) {
+    ReleaseEmfWarpCopy();
   }
-  if (emf_warp.device == reinterpret_cast<IDirect3DDevice9*>(device->get_native())) {
-    ReleaseEmfWarp();
+  for (auto* draw : REPLACED_DRAWS) {
+    if (draw->device == native_device) {
+      ReleaseReplacedDraw(draw);
+    }
   }
   std::erase_if(live_d3d9_devices, [device](const reshade::api::device* tracked) { return tracked == device; });
 }
