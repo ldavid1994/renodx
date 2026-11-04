@@ -79,8 +79,8 @@ bool IsToneMapped() {
   return shader_injection.tone_map_type > TONE_MAP_VANILLA;
 }
 
-// Hue Shift and Blowout are RenoDRT's (draw.hlsl's ToneMapPass). PsychoV-30 keeps the colour the
-// game rendered, and None does no tone mapping.
+// Hue Shift and Blowout are RenoDRT's (draw.hlsl's ToneMapPass) and shown only with it: PsychoV-30
+// keeps the colour the game rendered, and None does no tone mapping.
 bool IsRenoDrt() {
   return shader_injection.tone_map_type == TONE_MAP_RENO_DRT;
 }
@@ -199,10 +199,10 @@ renodx::utils::settings::Settings settings = {
         .label = "Hue Shift",
         .section = "Tone Mapping",
         .tooltip = "Hue-shift emulation strength: highlights turn toward the hue the game's clipping\n"
-                   "gave them (lamps and the sun toward yellow). RenoDRT only.",
+                   "gave them (lamps and the sun toward yellow).",
         .max = 100.f,
-        .is_enabled = &IsRenoDrt,
         .parse = [](float value) { return value * 0.01f; },
+        .is_visible = &IsRenoDrt,
     },
     new renodx::utils::settings::Setting{
         .key = "ColorGradeExposure",
@@ -270,10 +270,10 @@ renodx::utils::settings::Settings settings = {
         .default_value = 0.f,
         .label = "Blowout",
         .section = "Color Grading",
-        .tooltip = "Controls highlight desaturation due to overexposure. RenoDRT only.",
+        .tooltip = "Controls highlight desaturation due to overexposure.",
         .max = 100.f,
-        .is_enabled = &IsRenoDrt,
         .parse = [](float value) { return value * 0.01f; },
+        .is_visible = &IsRenoDrt,
     },
     new renodx::utils::settings::Setting{
         .key = "FxBloom",
