@@ -21,9 +21,9 @@ struct ShaderInjectData {
   float tone_map_type;
 
   float gamma_correction;
-  float hue_clip;    // strength toward vanilla's (clipped) hue: 0 = off, 1 = vanilla hue
-  float saturation;  // 1 = vanilla
-  float bloom;       // 1 = vanilla
+  float tone_map_hue_shift;  // RenoDRT: 0 = off, 1 = the hue of the game's per-channel clip
+  float saturation;          // 1 = vanilla
+  float bloom;               // 1 = vanilla
 
   float tone_map_exposure;    // 1 = vanilla
   float tone_map_highlights;  // 1 = neutral
@@ -35,7 +35,7 @@ struct ShaderInjectData {
   float psycho_shadows_match;
   float psycho_highlights_match;
   float swap_chain_output_preset;  // set by the add-on from Output Mode and HDR Format
-  float padding0;
+  float tone_map_blowout;          // RenoDRT: highlight desaturation, 0 = off
 };
 
 #ifdef __cplusplus
@@ -76,7 +76,7 @@ float4 shader_injection[4] : register(c50);
 #define RENODX_GRAPHICS_WHITE_NITS      shader_injection[0][2]
 #define RENODX_TONE_MAP_TYPE            shader_injection[0][3]
 #define RENODX_GAMMA_CORRECTION         shader_injection[1][0]
-#define CUSTOM_HUE_CLIP                 shader_injection[1][1]
+#define RENODX_TONE_MAP_HUE_SHIFT       shader_injection[1][1]
 #define RENODX_TONE_MAP_SATURATION      shader_injection[1][2]
 #define CUSTOM_BLOOM                    shader_injection[1][3]
 #define RENODX_TONE_MAP_EXPOSURE        shader_injection[2][0]
@@ -86,6 +86,7 @@ float4 shader_injection[4] : register(c50);
 #define CUSTOM_PSYCHO_SHADOWS_MATCH     shader_injection[3][0]
 #define CUSTOM_PSYCHO_HIGHLIGHTS_MATCH  shader_injection[3][1]
 #define RENODX_SWAP_CHAIN_OUTPUT_PRESET shader_injection[3][2]
+#define RENODX_TONE_MAP_BLOWOUT         shader_injection[3][3]
 
 // The add-on's own draws (Night Vision HDR, EMF HDR, the scene scale): their constants, after the
 // game's own (c0-c3), set for those draws only. Laid out as NightVisionConstants, EmfConstants and
@@ -117,7 +118,7 @@ cbuffer shader_injection : register(b13) {
 #define RENODX_GRAPHICS_WHITE_NITS      shader_injection.graphics_white_nits
 #define RENODX_TONE_MAP_TYPE            shader_injection.tone_map_type
 #define RENODX_GAMMA_CORRECTION         shader_injection.gamma_correction
-#define CUSTOM_HUE_CLIP                 shader_injection.hue_clip
+#define RENODX_TONE_MAP_HUE_SHIFT       shader_injection.tone_map_hue_shift
 #define RENODX_TONE_MAP_SATURATION      shader_injection.saturation
 #define CUSTOM_BLOOM                    shader_injection.bloom
 #define RENODX_TONE_MAP_EXPOSURE        shader_injection.tone_map_exposure
@@ -127,6 +128,7 @@ cbuffer shader_injection : register(b13) {
 #define CUSTOM_PSYCHO_SHADOWS_MATCH     shader_injection.psycho_shadows_match
 #define CUSTOM_PSYCHO_HIGHLIGHTS_MATCH  shader_injection.psycho_highlights_match
 #define RENODX_SWAP_CHAIN_OUTPUT_PRESET shader_injection.swap_chain_output_preset
+#define RENODX_TONE_MAP_BLOWOUT         shader_injection.tone_map_blowout
 
 #endif
 

@@ -56,7 +56,6 @@ float night_vision_hdr = 0.f;
 float emf_hdr = 0.f;
 
 constexpr float TONE_MAP_VANILLA = 0.f;
-constexpr float TONE_MAP_NONE = 1.f;
 constexpr float TONE_MAP_RENO_DRT = 3.f;
 
 constexpr float OUTPUT_MODE_SDR = 0.f;
@@ -80,9 +79,10 @@ bool IsToneMapped() {
   return shader_injection.tone_map_type > TONE_MAP_VANILLA;
 }
 
-// Hue Clip: RenoDRT and PsychoV-30; None does no tone mapping and keeps its colour.
-bool UsesHueClip() {
-  return IsToneMapped() && shader_injection.tone_map_type != TONE_MAP_NONE;
+// Hue Shift and Blowout are RenoDRT's (draw.hlsl's ToneMapPass). PsychoV-30 keeps the colour the
+// game rendered, and None does no tone mapping.
+bool IsRenoDrt() {
+  return shader_injection.tone_map_type == TONE_MAP_RENO_DRT;
 }
 
 bool IsHDR() {
@@ -193,6 +193,18 @@ renodx::utils::settings::Settings settings = {
         .is_enabled = &IsHDR,
     },
     new renodx::utils::settings::Setting{
+        .key = "ToneMapHueShift",
+        .binding = &shader_injection.tone_map_hue_shift,
+        .default_value = 50.f,
+        .label = "Hue Shift",
+        .section = "Tone Mapping",
+        .tooltip = "Hue-shift emulation strength: highlights turn toward the hue the game's clipping\n"
+                   "gave them (lamps and the sun toward yellow). RenoDRT only.",
+        .max = 100.f,
+        .is_enabled = &IsRenoDrt,
+        .parse = [](float value) { return value * 0.01f; },
+    },
+    new renodx::utils::settings::Setting{
         .key = "ColorGradeExposure",
         .binding = &shader_injection.tone_map_exposure,
         .default_value = 1.f,
@@ -253,6 +265,17 @@ renodx::utils::settings::Settings settings = {
         .parse = [](float value) { return value * 0.02f; },
     },
     new renodx::utils::settings::Setting{
+        .key = "ColorGradeBlowout",
+        .binding = &shader_injection.tone_map_blowout,
+        .default_value = 0.f,
+        .label = "Blowout",
+        .section = "Color Grading",
+        .tooltip = "Controls highlight desaturation due to overexposure. RenoDRT only.",
+        .max = 100.f,
+        .is_enabled = &IsRenoDrt,
+        .parse = [](float value) { return value * 0.01f; },
+    },
+    new renodx::utils::settings::Setting{
         .key = "FxBloom",
         .binding = &shader_injection.bloom,
         .default_value = 50.f,
@@ -262,20 +285,6 @@ renodx::utils::settings::Settings settings = {
                    "0 = off, 50 = vanilla, 100 = twice vanilla.",
         .max = 100.f,
         .parse = [](float value) { return value * 0.02f; },
-    },
-    new renodx::utils::settings::Setting{
-        .key = "FxHueClip",
-        .binding = &shader_injection.hue_clip,
-        .default_value = 50.f,
-        .label = "Hue Clip",
-        .section = "Effects",
-        .tooltip = "Simulates the colour of highlight clipping in an SDR game with no tone mapper.\n"
-                   "Vanilla clipped each colour channel at white, so bright lamps and lights turned\n"
-                   "whiter. Only colours that went past white are shifted.\n"
-                   "0 = the tone mapper's colour, 100 = vanilla's clipped hue.",
-        .max = 100.f,
-        .is_enabled = &UsesHueClip,
-        .parse = [](float value) { return value * 0.01f; },
     },
     new renodx::utils::settings::Setting{
         .key = "FxNightVisionHdr",
@@ -361,7 +370,6 @@ void OnPresetOff() {
   renodx::utils::settings::UpdateSetting("ToneMapGameNits", 203.f);
   renodx::utils::settings::UpdateSetting("ToneMapUINits", 203.f);
   renodx::utils::settings::UpdateSetting("GammaCorrection", 1.f);
-  renodx::utils::settings::UpdateSetting("FxHueClip", 100.f);
   renodx::utils::settings::UpdateSetting("ColorGradeExposure", 1.f);
   renodx::utils::settings::UpdateSetting("ColorGradeHighlights", 50.f);
   renodx::utils::settings::UpdateSetting("ColorGradeShadows", 50.f);
