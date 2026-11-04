@@ -77,9 +77,9 @@ bool IsToneMapped() {
 }
 
 // Hue Shift and Blowout are RenoDRT's (draw.hlsl's ToneMapPass) and shown only with it: None does no
-// tone mapping.
+// tone mapping. Read from the Tone Mapper setting, so in SDR they stay shown with it, greyed out.
 bool IsRenoDrt() {
-  return shader_injection.tone_map_type == TONE_MAP_RENO_DRT;
+  return tone_map_type_setting->parse(tone_map_type_setting->GetValue()) == TONE_MAP_RENO_DRT;
 }
 
 bool IsHDR() {
@@ -184,6 +184,7 @@ renodx::utils::settings::Settings settings = {
         .tooltip = "Hue-shift emulation strength: highlights turn toward the hue the game's clipping\n"
                    "gave them (lamps and the sun toward yellow).",
         .max = 100.f,
+        .is_enabled = &IsHDR,
         .parse = [](float value) { return value * 0.01f; },
         .is_visible = &IsRenoDrt,
     },
@@ -255,6 +256,7 @@ renodx::utils::settings::Settings settings = {
         .section = "Color Grading",
         .tooltip = "Controls highlight desaturation due to overexposure.",
         .max = 100.f,
+        .is_enabled = &IsHDR,
         .parse = [](float value) { return value * 0.01f; },
         .is_visible = &IsRenoDrt,
     },
@@ -342,7 +344,7 @@ renodx::utils::settings::Settings settings = {
     },
     new renodx::utils::settings::Setting{
         .value_type = renodx::utils::settings::SettingValueType::TEXT,
-        .label = "Version: 1.7.1 (" + std::string(renodx::utils::date::ISO_DATE) + ")",
+        .label = "Version: 1.8.0 (" + std::string(renodx::utils::date::ISO_DATE) + ")",
         .section = "About",
     },
 };
@@ -371,7 +373,7 @@ void UpdateOutput() {
   if (IsHDR()) {
     shader_injection.swap_chain_output_preset = SWAP_CHAIN_OUTPUT_PRESET_HDR10;
     shader_injection.tone_map_type = tone_map_type_setting->parse(tone_map_type_setting->GetValue());
-    // Peak never below Game Brightness: the tone mappers can't map white to a lower peak.
+    // Peak never below Game Brightness: RenoDRT and the vision HDR roll off from white toward it.
     shader_injection.peak_white_nits = (std::max)(peak_nits_setting->GetValue(), game_nits_setting->GetValue());
     shader_injection.diffuse_white_nits = game_nits_setting->GetValue();
     shader_injection.graphics_white_nits = ui_nits_setting->GetValue();
@@ -405,7 +407,13 @@ void OnInitSwapchain(reshade::api::swapchain* swapchain, bool resize) {
   const auto display_info = renodx::utils::swapchain::GetDisplayInfo(swapchain);
   const bool windows_hdr = (display_info.hdr_supported && display_info.hdr_enabled);
   output_mode_setting->Set(windows_hdr ? OUTPUT_MODE_HDR : OUTPUT_MODE_SDR);
-  peak_nits_setting->default_value = std::round(display_info.peak_nits);
+  // A Peak still at its default follows the display's, as Reset sets it.
+  const bool peak_was_default = (peak_nits_setting->GetValue() == peak_nits_setting->default_value);
+  peak_nits_setting->default_value =
+      std::clamp(std::round(display_info.peak_nits), peak_nits_setting->min, peak_nits_setting->max);
+  if (peak_was_default) {
+    peak_nits_setting->Set(peak_nits_setting->default_value)->Write();
+  }
 
   fired_on_init_swapchain = true;
 }

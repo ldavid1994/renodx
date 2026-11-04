@@ -7,8 +7,9 @@
 // The composite replacement is ps_3_0, which has c0-c223; the game's own composite uses no float
 // constants, so the injection lives in c50-c53 (constant_buffer_offset = 50 * 4 in addon.cpp).
 // Tone Mapper values: Vanilla 0, None 1 and RenoDRT 3, the framework's types.
-// Shadows at 100. RenoDRT lifts dark values by adding c * x^(2 - shadows); at 2 that is a flat floor
-// under everything above black (blotches, near-black colours blown up), so the slider stops at 1.75.
+// Shadows at 100. RenoDRT and None lift dark values with renodx::color::grade::Shadows, adding
+// c * x^(2 - shadows); at 2 that is a flat floor under everything above black (blotches, near-black
+// colours blown up), so the slider stops at 1.75.
 #define CUSTOM_SHADOWS_MAX 1.75f
 
 struct ShaderInjectData {
