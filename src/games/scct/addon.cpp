@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2026
+ * Copyright (C) 2024 Carlos Lopez
  * SPDX-License-Identifier: MIT
  *
  * RenoDX HDR mod for Tom Clancy's Splinter Cell: Chaos Theory (Steam, D3D9, 32-bit).
