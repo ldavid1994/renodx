@@ -29,23 +29,22 @@ float4 main(float4 texcoord : TEXCOORD0) : COLOR {
   // Gamma-encoded, like everything the game draws: it was shown on the display as written.
   // Bloom: 1 = vanilla.
   const float3 composite = scene + bloom_color * CUSTOM_BLOOM;
-  // What vanilla showed: the sum clipped at white by the 8-bit back buffer.
-  const float3 vanilla = renodx::color::srgb::Decode(saturate(composite));
 
   float3 color;
   [branch] if (RENODX_TONE_MAP_TYPE == renodx::draw::TONE_MAP_TYPE_VANILLA) {
-    color = vanilla;
+    // What vanilla showed: the sum clipped at white by the 8-bit back buffer.
+    color = renodx::color::srgb::Decode(saturate(composite));
   }
   else {
     float3 untonemapped = renodx::color::srgb::DecodeSafe(composite);
-    // Peak in Game Brightness units. With Gamma Correction 2.2, RenderIntermediatePass maps sRGB-decoded
-    // values to 2.2-decoded ones, so the peak is pre-corrected the same way ToneMapPass does it.
-    // The add-on keeps it at 1 or more.
-    float peak = RENODX_PEAK_WHITE_NITS / RENODX_DIFFUSE_WHITE_NITS;
-    if (RENODX_GAMMA_CORRECTION > 0.f) {
-      peak = renodx::color::correct::Gamma(peak, true, 2.2f);
-    }
     [branch] if (RENODX_TONE_MAP_TYPE == CUSTOM_TONE_MAP_TYPE_PSYCHO_V) {
+      // Peak in Game Brightness units. With Gamma Correction 2.2, RenderIntermediatePass maps
+      // sRGB-decoded values to 2.2-decoded ones, so the peak is pre-corrected the same way
+      // ToneMapPass does it. The add-on keeps it at 1 or more.
+      float peak = RENODX_PEAK_WHITE_NITS / RENODX_DIFFUSE_WHITE_NITS;
+      if (RENODX_GAMMA_CORRECTION > 0.f) {
+        peak = renodx::color::correct::Gamma(peak, true, 2.2f);
+      }
       // Shadows below 50 darken with RenoDRT's curve (renodx::color::grade::ApplyUserColorGrading)
       // before PsychoV-30: below 1, PsychoV-30's own shadow curve goes negative toward black, and its
       // sign handling folds those pixels back up into blotches.
