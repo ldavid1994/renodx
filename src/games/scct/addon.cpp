@@ -565,13 +565,22 @@ void RestoreReplacedDraw(ReplacedDraw* draw) {
 constexpr UINT DRAW_SETTINGS_REGISTER = 8;
 // A finished scene waits for the scene scale (see that section): set by the draws that finish one.
 bool scene_awaits_scale = false;
-// The scene scale has drawn in this frame. Night vision reads the scene after the composite, so a
-// scale before its image would make night vision's input follow UI Brightness: logged once.
+// The scene scale has drawn in this frame, triggered by scene_scale_trigger. Night vision and EMF
+// draw over the scene after the composite, so a scale before them comes too early: logged once each.
 bool scene_scaled_this_frame = false;
+const char* scene_scale_trigger = "";
 // Night vision drew its image in this frame, and in the one before. While it is on, the composite
 // doesn't finish the scene: night vision's image does.
 bool night_vision_this_frame = false;
 bool night_vision_last_frame = false;
+
+void WarnIfScaledBefore(const char* draw_name) {
+  static std::vector<const char*> warned;
+  if (!scene_scaled_this_frame || std::ranges::find(warned, draw_name) != warned.end()) return;
+  warned.push_back(draw_name);
+  reshade::log::message(reshade::log::level::warning,
+                        ("[scct] the scene was scaled before " + std::string(draw_name) + ", by " + scene_scale_trigger).c_str());
+}
 static_assert(sizeof(NightVisionConstants) % (4 * sizeof(float)) == 0,
               "NightVisionConstants must fill whole float4 registers");
 constexpr UINT NIGHT_VISION_CONSTANT_REGISTER_COUNT = sizeof(NightVisionConstants) / (4 * sizeof(float));
@@ -579,10 +588,7 @@ constexpr UINT NIGHT_VISION_CONSTANT_REGISTER_COUNT = sizeof(NightVisionConstant
 constexpr DWORD NIGHT_VISION_GLOW_STAGES[] = {1, 2};
 
 bool OnNightVisionImageDraw(reshade::api::command_list* cmd_list) {
-  static bool logged_early_scale = false;
-  if (scene_scaled_this_frame && !std::exchange(logged_early_scale, true)) {
-    reshade::log::message(reshade::log::level::warning, "[scct] the scene was scaled before night vision's image");
-  }
+  WarnIfScaledBefore("night vision's image");
   night_vision_this_frame = true;
   if (night_vision_hdr == 0.f || !IsToneMapped()) return true;
   auto* native_device = reinterpret_cast<IDirect3DDevice9*>(cmd_list->get_device()->get_native());
@@ -677,6 +683,7 @@ bool OnEmfLevelsSumDraw(reshade::api::command_list* cmd_list) {
 }
 
 bool OnEmfImageDraw(reshade::api::command_list* cmd_list) {
+  WarnIfScaledBefore("EMF's image");
   if (emf_hdr == 0.f || !IsToneMapped()) return true;
   if (std::ranges::find(emf_levels, nullptr) != std::end(emf_levels)) return true;
   auto* native_device = reinterpret_cast<IDirect3DDevice9*>(cmd_list->get_device()->get_native());
@@ -792,6 +799,9 @@ bool OnEmfWarpDraw(reshade::api::command_list* cmd_list) {
                                 && screen_desc.Width == target_desc.Width && screen_desc.Height == target_desc.Height;
   if (screen != nullptr) {
     screen->Release();
+  }
+  if (is_screen_redraw) {
+    WarnIfScaledBefore("EMF's warp");
   }
   IDirect3DTexture9* copy = (is_screen_redraw ? CopyScreen(native_device, render_target, target_desc) : nullptr);
   render_target->Release();
@@ -921,6 +931,7 @@ void ScaleScene(IDirect3DDevice9* native_device, const char* trigger) {
   native_device->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP, 2, quad, sizeof(Vertex));
   RestoreReplacedDraw(&scene_scale_draw);
   scene_scaled_this_frame = true;
+  scene_scale_trigger = trigger;
 
   static std::vector<const char*> logged_triggers;
   if (std::ranges::find(logged_triggers, trigger) == logged_triggers.end()) {
