@@ -446,8 +446,6 @@ struct ReplacedDraw {
 ReplacedDraw night_vision_draw;
 ReplacedDraw emf_image_draw;
 ReplacedDraw emf_warp_draw;
-ReplacedDraw scene_scale_draw;
-constexpr ReplacedDraw* REPLACED_DRAWS[] = {&night_vision_draw, &emf_image_draw, &emf_warp_draw, &scene_scale_draw};
 
 void ReleaseReplacedDraw(ReplacedDraw* draw) {
   if (draw->vertex_shader != nullptr) {
@@ -579,20 +577,6 @@ IDirect3DTexture9* CopyScreen(IDirect3DDevice9* native_device, IDirect3DSurface9
 // and UI Brightness are equal, as always in SDR.
 // ---------------------------------------------------------------------------
 
-// A finished scene waits for the scene scale: set by the draws that finish one.
-bool scene_awaits_scale = false;
-// What scaled the scene in this frame, or nullptr. Night vision and EMF draw over the scene after
-// the composite, so a scale before them comes too early: logged once each.
-const char* scene_scale_trigger = nullptr;
-
-void WarnIfScaledBefore(const char* draw_name) {
-  static std::vector<const char*> warned;
-  if (scene_scale_trigger == nullptr || std::ranges::find(warned, draw_name) != warned.end()) return;
-  warned.push_back(draw_name);
-  reshade::log::message(reshade::log::level::warning,
-                        ("[scct] the scene was scaled before " + std::string(draw_name) + ", by " + scene_scale_trigger).c_str());
-}
-
 static_assert(sizeof(SceneScaleConstants) % (4 * sizeof(float)) == 0,
               "SceneScaleConstants must fill whole float4 registers");
 constexpr UINT SCENE_SCALE_CONSTANT_REGISTER_COUNT = sizeof(SceneScaleConstants) / (4 * sizeof(float));
@@ -619,90 +603,119 @@ constexpr std::pair<D3DSAMPLERSTATETYPE, DWORD> SCENE_SCALE_SAMPLER_STATES[] = {
     {D3DSAMP_SRGBTEXTURE, FALSE},
 };
 
-void OnSceneDrawn(reshade::api::command_list* cmd_list) {
-  scene_awaits_scale = true;
-}
+// The frame state of the scene scale and its draw. A finished scene waits until a trigger with the
+// back buffer's RGBA16F clone bound scales it, and never carries into the next frame.
+struct SceneScale {
+  ReplacedDraw draw;  // released with the other replaced draws (REPLACED_DRAWS)
+  bool scene_awaits_scale = false;
+  // What scaled the scene in this frame, or nullptr. Night vision and EMF draw over the scene after
+  // the composite, so a scale before them comes too early: logged once each.
+  const char* scaled_by = nullptr;
+  std::vector<const char*> logged_triggers;
+  std::vector<const char*> warned_draws;
 
-// Scales the finished scene, if one waits, on the render target the game draws the HUD to.
-// trigger names the draw or the present for the one-time log line. A target other than the back
-// buffer's RGBA16F clone isn't the screen: the scene keeps waiting for the next trigger.
-void ScaleScene(IDirect3DDevice9* native_device, const char* trigger) {
-  if (!scene_awaits_scale) return;
-  const float scale = shader_injection.diffuse_white_nits / (std::max)(shader_injection.graphics_white_nits, 1.f);
-  if (scale == 1.f) {
+  void MarkFinished() {
+    scene_awaits_scale = true;
+  }
+
+  // Forgets this frame's scene, at the present and when the swap chain goes away.
+  void Reset() {
     scene_awaits_scale = false;
-    return;
+    scaled_by = nullptr;
   }
-  IDirect3DSurface9* render_target = nullptr;
-  if (FAILED(native_device->GetRenderTarget(0, &render_target)) || render_target == nullptr) return;
-  D3DSURFACE_DESC target_desc = {};
-  render_target->GetDesc(&target_desc);
-  if (target_desc.Format != D3DFMT_A16B16G16R16F) {
+
+  void WarnIfScaledBefore(const char* draw_name) {
+    if (scaled_by == nullptr || std::ranges::find(warned_draws, draw_name) != warned_draws.end()) return;
+    warned_draws.push_back(draw_name);
+    reshade::log::message(reshade::log::level::warning,
+                          ("[scct] the scene was scaled before " + std::string(draw_name) + ", by " + scaled_by).c_str());
+  }
+
+  // Scales the finished scene, if one waits, on the render target the game draws the HUD to.
+  // trigger names the draw or the present for the one-time log line. A target other than the back
+  // buffer's RGBA16F clone isn't the screen: the scene keeps waiting for the next trigger.
+  void ScaleAt(IDirect3DDevice9* native_device, const char* trigger) {
+    if (!scene_awaits_scale) return;
+    const float scale = shader_injection.diffuse_white_nits / (std::max)(shader_injection.graphics_white_nits, 1.f);
+    if (scale == 1.f) {
+      scene_awaits_scale = false;
+      return;
+    }
+    IDirect3DSurface9* render_target = nullptr;
+    if (FAILED(native_device->GetRenderTarget(0, &render_target)) || render_target == nullptr) return;
+    D3DSURFACE_DESC target_desc = {};
+    render_target->GetDesc(&target_desc);
+    if (target_desc.Format != D3DFMT_A16B16G16R16F) {
+      render_target->Release();
+      return;
+    }
+    scene_awaits_scale = false;
+    IDirect3DTexture9* copy = nullptr;
+    if (CreateReplacedDraw(native_device, __scene_scale_vertex_shader, __scene_scale_pixel_shader, "Scene scale",
+                           &draw)) {
+      copy = CopyScreen(native_device, render_target, target_desc);
+    }
     render_target->Release();
-    return;
-  }
-  scene_awaits_scale = false;
-  IDirect3DTexture9* copy = nullptr;
-  if (CreateReplacedDraw(native_device, __scene_scale_vertex_shader, __scene_scale_pixel_shader, "Scene scale",
-                         &scene_scale_draw)) {
-    copy = CopyScreen(native_device, render_target, target_desc);
-  }
-  render_target->Release();
-  if (copy == nullptr) return;
+    if (copy == nullptr) return;
 
-  const SceneScaleConstants constants = {.scale = scale, .encoding = SwapChainDecoding()};
-  const D3DVIEWPORT9 viewport = {.Width = target_desc.Width, .Height = target_desc.Height, .MaxZ = 1.f};
-  ReplaceDraw(
-      native_device,
-      [&]() {
-        native_device->SetTexture(0, copy);
-        for (const auto& [state, value] : SCENE_SCALE_SAMPLER_STATES) {
-          native_device->SetSamplerState(0, state, value);
-        }
-        for (const auto& [state, value] : SCENE_SCALE_RENDER_STATES) {
-          native_device->SetRenderState(state, value);
-        }
-        native_device->SetViewport(&viewport);
-        native_device->SetPixelShaderConstantF(DRAW_SETTINGS_REGISTER, reinterpret_cast<const float*>(&constants),
-                                               SCENE_SCALE_CONSTANT_REGISTER_COUNT);
-        native_device->SetVertexShader(scene_scale_draw.vertex_shader);
-        native_device->SetPixelShader(scene_scale_draw.pixel_shader);
-        native_device->SetFVF(D3DFVF_XYZW | D3DFVF_TEX1);
-        // Recorded so the block puts back the game's stream 0, which DrawPrimitiveUP clears.
-        native_device->SetStreamSource(0, nullptr, 0, 0);
-      },
-      &scene_scale_draw);
-  if (!scene_scale_draw.replaced) return;
+    const SceneScaleConstants constants = {.scale = scale, .encoding = SwapChainDecoding()};
+    const D3DVIEWPORT9 viewport = {.Width = target_desc.Width, .Height = target_desc.Height, .MaxZ = 1.f};
+    ReplaceDraw(
+        native_device,
+        [&]() {
+          native_device->SetTexture(0, copy);
+          for (const auto& [state, value] : SCENE_SCALE_SAMPLER_STATES) {
+            native_device->SetSamplerState(0, state, value);
+          }
+          for (const auto& [state, value] : SCENE_SCALE_RENDER_STATES) {
+            native_device->SetRenderState(state, value);
+          }
+          native_device->SetViewport(&viewport);
+          native_device->SetPixelShaderConstantF(DRAW_SETTINGS_REGISTER, reinterpret_cast<const float*>(&constants),
+                                                 SCENE_SCALE_CONSTANT_REGISTER_COUNT);
+          native_device->SetVertexShader(draw.vertex_shader);
+          native_device->SetPixelShader(draw.pixel_shader);
+          native_device->SetFVF(D3DFVF_XYZW | D3DFVF_TEX1);
+          // Recorded so the block puts back the game's stream 0, which DrawPrimitiveUP clears.
+          native_device->SetStreamSource(0, nullptr, 0, 0);
+        },
+        &draw);
+    if (!draw.replaced) return;
 
-  struct Vertex {
-    float x, y, z, w, u, v;
-  };
-  // In clip space, half a pixel up and left: D3D9 puts pixel centres on integer coordinates, so each
-  // pixel then samples its own texel.
-  const float half_pixel_x = 1.f / static_cast<float>(target_desc.Width);
-  const float half_pixel_y = 1.f / static_cast<float>(target_desc.Height);
-  const Vertex quad[] = {
-      {.x = -1.f - half_pixel_x, .y = 1.f + half_pixel_y, .z = 0.f, .w = 1.f, .u = 0.f, .v = 0.f},
-      {.x = 1.f - half_pixel_x, .y = 1.f + half_pixel_y, .z = 0.f, .w = 1.f, .u = 1.f, .v = 0.f},
-      {.x = -1.f - half_pixel_x, .y = -1.f + half_pixel_y, .z = 0.f, .w = 1.f, .u = 0.f, .v = 1.f},
-      {.x = 1.f - half_pixel_x, .y = -1.f + half_pixel_y, .z = 0.f, .w = 1.f, .u = 1.f, .v = 1.f},
-  };
-  native_device->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP, 2, quad, sizeof(Vertex));
-  RestoreReplacedDraw(&scene_scale_draw);
-  scene_scale_trigger = trigger;
+    struct Vertex {
+      float x, y, z, w, u, v;
+    };
+    // In clip space, half a pixel up and left: D3D9 puts pixel centres on integer coordinates, so each
+    // pixel then samples its own texel.
+    const float half_pixel_x = 1.f / static_cast<float>(target_desc.Width);
+    const float half_pixel_y = 1.f / static_cast<float>(target_desc.Height);
+    const Vertex quad[] = {
+        {.x = -1.f - half_pixel_x, .y = 1.f + half_pixel_y, .z = 0.f, .w = 1.f, .u = 0.f, .v = 0.f},
+        {.x = 1.f - half_pixel_x, .y = 1.f + half_pixel_y, .z = 0.f, .w = 1.f, .u = 1.f, .v = 0.f},
+        {.x = -1.f - half_pixel_x, .y = -1.f + half_pixel_y, .z = 0.f, .w = 1.f, .u = 0.f, .v = 1.f},
+        {.x = 1.f - half_pixel_x, .y = -1.f + half_pixel_y, .z = 0.f, .w = 1.f, .u = 1.f, .v = 1.f},
+    };
+    native_device->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP, 2, quad, sizeof(Vertex));
+    RestoreReplacedDraw(&draw);
+    scaled_by = trigger;
 
-  static std::vector<const char*> logged_triggers;
-  if (std::ranges::find(logged_triggers, trigger) == logged_triggers.end()) {
-    logged_triggers.push_back(trigger);
-    reshade::log::message(reshade::log::level::info,
-                          (std::string("[scct] scene scaled to Game Brightness at ") + trigger).c_str());
+    if (std::ranges::find(logged_triggers, trigger) == logged_triggers.end()) {
+      logged_triggers.push_back(trigger);
+      reshade::log::message(reshade::log::level::info,
+                            (std::string("[scct] scene scaled to Game Brightness at ") + trigger).c_str());
+    }
   }
+};
+SceneScale scene_scale;
+
+void OnSceneDrawn(reshade::api::command_list* cmd_list) {
+  scene_scale.MarkFinished();
 }
 
 // The HUD shader also draws world sprites over the finished scene, light coronas among them, in a
 // screen blend (ONE, INVSRCCOLOR): those belong to the scene, are scaled with it, and don't finish it.
 bool OnHudDraw(reshade::api::command_list* cmd_list) {
-  if (!scene_awaits_scale) return true;
+  if (!scene_scale.scene_awaits_scale) return true;
   auto* native_device = reinterpret_cast<IDirect3DDevice9*>(cmd_list->get_device()->get_native());
   DWORD blend = FALSE;
   DWORD source_blend = 0;
@@ -711,7 +724,7 @@ bool OnHudDraw(reshade::api::command_list* cmd_list) {
   native_device->GetRenderState(D3DRS_SRCBLEND, &source_blend);
   native_device->GetRenderState(D3DRS_DESTBLEND, &dest_blend);
   if (blend != FALSE && source_blend == D3DBLEND_ONE && dest_blend == D3DBLEND_INVSRCCOLOR) return true;
-  ScaleScene(native_device, "the HUD (0x8F122047)");
+  scene_scale.ScaleAt(native_device, "the HUD (0x8F122047)");
   return true;
 }
 
@@ -731,7 +744,7 @@ constexpr UINT NIGHT_VISION_CONSTANT_REGISTER_COUNT = sizeof(NightVisionConstant
 constexpr DWORD NIGHT_VISION_GLOW_STAGES[] = {1, 2};
 
 bool OnNightVisionImageDraw(reshade::api::command_list* cmd_list) {
-  WarnIfScaledBefore("night vision's image");
+  scene_scale.WarnIfScaledBefore("night vision's image");
   if (night_vision_hdr == 0.f || !IsToneMapped()) return true;
   auto* native_device = reinterpret_cast<IDirect3DDevice9*>(cmd_list->get_device()->get_native());
   if (!CreateReplacedDraw(native_device, __night_vision_vertex_shader, __night_vision_hdr_pixel_shader,
@@ -775,7 +788,7 @@ bool OnNightVisionImageDraw(reshade::api::command_list* cmd_list) {
 
 void OnNightVisionImageDrawn(reshade::api::command_list* cmd_list) {
   RestoreReplacedDraw(&night_vision_draw);
-  scene_awaits_scale = true;
+  scene_scale.MarkFinished();
 }
 
 // ---------------------------------------------------------------------------
@@ -825,7 +838,7 @@ bool OnEmfLevelsSumDraw(reshade::api::command_list* cmd_list) {
 }
 
 bool OnEmfImageDraw(reshade::api::command_list* cmd_list) {
-  WarnIfScaledBefore("EMF's image");
+  scene_scale.WarnIfScaledBefore("EMF's image");
   if (emf_hdr == 0.f || !IsToneMapped()) return true;
   if (std::ranges::find(emf_levels, nullptr) != std::end(emf_levels)) return true;
   auto* native_device = reinterpret_cast<IDirect3DDevice9*>(cmd_list->get_device()->get_native());
@@ -874,7 +887,7 @@ void OnEmfImageDrawn(reshade::api::command_list* cmd_list) {
     emf_image_drawn = true;
   }
   RestoreReplacedDraw(&emf_image_draw);
-  scene_awaits_scale = true;
+  scene_scale.MarkFinished();
 }
 
 // After EMF's image, the game copies the screen to an 8-bit texture and draws it back through a
@@ -903,7 +916,7 @@ bool OnEmfWarpDraw(reshade::api::command_list* cmd_list) {
   }
   IDirect3DTexture9* copy = nullptr;
   if (is_screen_redraw) {
-    WarnIfScaledBefore("EMF's warp");
+    scene_scale.WarnIfScaledBefore("EMF's warp");
     copy = CopyScreen(native_device, render_target, target_desc);
   }
   render_target->Release();
@@ -923,11 +936,12 @@ void OnEmfWarpDrawn(reshade::api::command_list* cmd_list) {
   RestoreReplacedDraw(&emf_warp_draw);
 }
 
+constexpr ReplacedDraw* REPLACED_DRAWS[] = {&night_vision_draw, &emf_image_draw, &emf_warp_draw, &scene_scale.draw};
+
 void OnDestroySwapchain(reshade::api::swapchain* swapchain, bool resize) {
   if (swapchain->get_device()->get_api() != reshade::api::device_api::d3d9) return;
   last_render_target = {0u};
-  scene_awaits_scale = false;
-  scene_scale_trigger = nullptr;
+  scene_scale.Reset();
   ReleaseEmfLevels();
   ReleaseScreenCopy();
   for (auto* draw : REPLACED_DRAWS) {
@@ -1104,17 +1118,16 @@ void OnPresent(reshade::api::command_queue* queue, reshade::api::swapchain* swap
   }
 
   // A frame without HUD draws: the scene is scaled here, before the orphaned clone is forwarded.
-  if (scene_awaits_scale) {
+  if (scene_scale.scene_awaits_scale) {
     auto* native_device = reinterpret_cast<IDirect3DDevice9*>(device->get_native());
     native_device->BeginScene();
-    ScaleScene(native_device, "the present");
+    scene_scale.ScaleAt(native_device, "the present");
     native_device->EndScene();
-    // Not scaled here (another target is bound): this frame's scene is lost, not the next frame's.
-    scene_awaits_scale = false;
   }
+  // Not scaled here (another target is bound): this frame's scene is lost, not the next frame's.
+  scene_scale.Reset();
   ReleaseEmfLevels();
   emf_image_drawn = false;
-  scene_scale_trigger = nullptr;
 
   // Orphaned back buffer clone: the game keeps drawing into the proxy's first clone of
   // the back buffer after the proxy replaced it. The full-size RGBA16F target it last bound, if it
