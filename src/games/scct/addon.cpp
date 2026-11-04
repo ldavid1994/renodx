@@ -407,12 +407,15 @@ void OnInitSwapchain(reshade::api::swapchain* swapchain, bool resize) {
   const auto display_info = renodx::utils::swapchain::GetDisplayInfo(swapchain);
   const bool windows_hdr = (display_info.hdr_supported && display_info.hdr_enabled);
   output_mode_setting->Set(windows_hdr ? OUTPUT_MODE_HDR : OUTPUT_MODE_SDR);
-  // A Peak still at its default follows the display's, as Reset sets it.
-  const bool peak_was_default = (peak_nits_setting->GetValue() == peak_nits_setting->default_value);
-  peak_nits_setting->default_value =
-      std::clamp(std::round(display_info.peak_nits), peak_nits_setting->min, peak_nits_setting->max);
-  if (peak_was_default) {
-    peak_nits_setting->Set(peak_nits_setting->default_value)->Write();
+  // With Windows HDR on, the display's peak becomes Peak's default (what Reset sets), and a Peak still
+  // at its default follows it. With HDR off the display may report its SDR brightness instead.
+  if (windows_hdr) {
+    const bool peak_was_default = (peak_nits_setting->GetValue() == peak_nits_setting->default_value);
+    peak_nits_setting->default_value =
+        std::clamp(std::round(display_info.peak_nits), peak_nits_setting->min, peak_nits_setting->max);
+    if (peak_was_default) {
+      peak_nits_setting->Set(peak_nits_setting->default_value)->Write();
+    }
   }
 
   fired_on_init_swapchain = true;
