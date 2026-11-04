@@ -133,8 +133,8 @@ renodx::utils::settings::Settings settings = {
     tone_map_type_setting = new renodx::utils::settings::Setting{
         .key = "ToneMapType",
         .value_type = renodx::utils::settings::SettingValueType::INTEGER,
-        // PsychoV-30: closest to vanilla below paper white and in highlight colour.
-        .default_value = 3.f,
+        // RenoDRT, upstream's default, with Hue Shift for the clip's hue; PsychoV-30 stays an option.
+        .default_value = 2.f,
         .can_reset = true,
         .label = "Tone Mapper",
         .section = "Tone Mapping",
