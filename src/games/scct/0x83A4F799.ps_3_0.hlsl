@@ -36,9 +36,11 @@ float4 main(float4 texcoord : TEXCOORD0) : COLOR {
     color = renodx::color::srgb::Decode(saturate(composite));
   }
   else {
+    // The sum in linear light, before the 8-bit clip: everything the game drew past white.
+    const float3 untonemapped = renodx::color::srgb::DecodeSafe(composite);
     // RenoDRT and None read exposure, highlights, shadows, contrast and saturation themselves, and
     // RenoDRT also Hue Shift (toward the hue of the game's per-channel clip) and Blowout.
-    color = renodx::draw::ToneMapPass(renodx::color::srgb::DecodeSafe(composite));
+    color = renodx::draw::ToneMapPass(untonemapped);
   }
   return float4(renodx::draw::RenderIntermediatePass(color), 1.f);
 }
