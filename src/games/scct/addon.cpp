@@ -465,8 +465,9 @@ reshade::api::resource_view last_render_target = {0u};
 // the game's state back the same way. D3D9 state stays set for later draws, so the game's values of
 // the state a replaced draw sets are put back once it has drawn. A state block recorded from that
 // draw's own binds holds exactly that state: it captures the game's values before the draw and
-// applies them after it. The block holds references to what it captured, game textures in D3DPOOL_DEFAULT among
-// them, so it is released before a device reset (OnDestroySwapchain) and recorded again after it.
+// applies them after it. The block holds references to what it captured, game textures in
+// D3DPOOL_DEFAULT among them, so it is released before a device reset (OnDestroySwapchain) and
+// recorded again after it.
 // ---------------------------------------------------------------------------
 
 struct ReplacedDraw {
@@ -799,10 +800,11 @@ bool OnEmfWarpDraw(reshade::api::command_list* cmd_list) {
   if (screen != nullptr) {
     screen->Release();
   }
+  IDirect3DTexture9* copy = nullptr;
   if (is_screen_redraw) {
     WarnIfScaledBefore("EMF's warp");
+    copy = CopyScreen(native_device, render_target, target_desc);
   }
-  IDirect3DTexture9* copy = (is_screen_redraw ? CopyScreen(native_device, render_target, target_desc) : nullptr);
   render_target->Release();
   if (copy == nullptr) return true;
 
@@ -892,10 +894,11 @@ void ScaleScene(IDirect3DDevice9* native_device, const char* trigger) {
     return;
   }
   scene_awaits_scale = false;
-  IDirect3DTexture9* copy = (CreateReplacedDraw(native_device, __scene_scale_vertex_shader, __scene_scale_pixel_shader,
-                                                "Scene scale", &scene_scale_draw)
-                                 ? CopyScreen(native_device, render_target, target_desc)
-                                 : nullptr);
+  IDirect3DTexture9* copy = nullptr;
+  if (CreateReplacedDraw(native_device, __scene_scale_vertex_shader, __scene_scale_pixel_shader, "Scene scale",
+                         &scene_scale_draw)) {
+    copy = CopyScreen(native_device, render_target, target_desc);
+  }
   render_target->Release();
   if (copy == nullptr) return;
 
