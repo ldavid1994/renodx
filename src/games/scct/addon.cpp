@@ -60,15 +60,12 @@ constexpr float TONE_MAP_RENO_DRT = 3.f;
 
 constexpr float OUTPUT_MODE_SDR = 0.f;
 constexpr float OUTPUT_MODE_HDR = 1.f;
-constexpr float HDR_FORMAT_HDR10 = 0.f;
 
 // renodx::draw::SWAP_CHAIN_OUTPUT_PRESET_* (src/shaders/draw.hlsl).
-constexpr float SWAP_CHAIN_OUTPUT_PRESET_NONE = -1.f;
 constexpr float SWAP_CHAIN_OUTPUT_PRESET_SDR = 0.f;
 constexpr float SWAP_CHAIN_OUTPUT_PRESET_HDR10 = 1.f;
 
 renodx::utils::settings::Setting* output_mode_setting = nullptr;
-renodx::utils::settings::Setting* hdr_format_setting = nullptr;
 renodx::utils::settings::Setting* tone_map_type_setting = nullptr;
 renodx::utils::settings::Setting* peak_nits_setting = nullptr;
 renodx::utils::settings::Setting* game_nits_setting = nullptr;
@@ -113,21 +110,9 @@ renodx::utils::settings::Settings settings = {
         .label = "Output Mode",
         .section = "Display Output",
         .tooltip = "SDR: the game's picture for an SDR display (or HDR off in Windows).\n"
-                   "HDR: HDR output in the HDR Format below.\n"
+                   "HDR: HDR10 output (BT.2020 PQ).\n"
                    "Starts on SDR or HDR to match Windows' HDR setting.",
         .labels = {"SDR", "HDR"},
-        .is_global = true,
-    },
-    hdr_format_setting = new renodx::utils::settings::Setting{
-        .key = "HDRFormat",
-        .value_type = renodx::utils::settings::SettingValueType::INTEGER,
-        .can_reset = false,
-        .label = "HDR Format",
-        .section = "Display Output",
-        .tooltip = "HDR10: 10-bit BT.2020 PQ.\n"
-                   "scRGB: 16-bit float BT.709, for capture or overlay tools that need it.\n"
-                   "Restart the game to apply.",
-        .labels = {"HDR10", "scRGB"},
         .is_global = true,
     },
     tone_map_type_setting = new renodx::utils::settings::Setting{
@@ -380,12 +365,11 @@ void OnPresetOff() {
   renodx::utils::settings::UpdateSetting("FxEmfHdr", 0.f);
 }
 
-// Writes what the shaders read from Output Mode, on the HDR Format chosen at startup. Run every
-// game frame, so slider changes, presets and Reset all reach the shaders through it.
+// Writes what the shaders read from Output Mode. Run every game frame, so slider changes, presets
+// and Reset all reach the shaders through it.
 void UpdateOutput() {
-  const bool is_hdr10 = (renodx::mods::swapchain::target_format == reshade::api::format::r10g10b10a2_unorm);
   if (IsHDR()) {
-    shader_injection.swap_chain_output_preset = (is_hdr10 ? SWAP_CHAIN_OUTPUT_PRESET_HDR10 : SWAP_CHAIN_OUTPUT_PRESET_NONE);
+    shader_injection.swap_chain_output_preset = SWAP_CHAIN_OUTPUT_PRESET_HDR10;
     shader_injection.tone_map_type = tone_map_type_setting->parse(tone_map_type_setting->GetValue());
     // Peak never below Game Brightness: the tone mappers can't map white to a lower peak.
     shader_injection.peak_white_nits = (std::max)(peak_nits_setting->GetValue(), game_nits_setting->GetValue());
@@ -393,15 +377,13 @@ void UpdateOutput() {
     shader_injection.graphics_white_nits = ui_nits_setting->GetValue();
     shader_injection.gamma_correction = gamma_correction_setting->GetValue();
   } else {
-    // SDR: the Vanilla picture, with white at 1.0 in the sRGB swap chain, or at 80 nits (scRGB 1.0)
-    // in the scRGB one, peak at white, and no gamma correction: the display decodes the game's image
-    // itself, as in vanilla.
-    const float sdr_white_nits = (is_hdr10 ? 1.f : 80.f);
-    shader_injection.swap_chain_output_preset = (is_hdr10 ? SWAP_CHAIN_OUTPUT_PRESET_SDR : SWAP_CHAIN_OUTPUT_PRESET_NONE);
+    // SDR: the Vanilla picture in the sRGB colour space, white and peak at 1.0 and no gamma
+    // correction: the display decodes the game's image itself, as in vanilla.
+    shader_injection.swap_chain_output_preset = SWAP_CHAIN_OUTPUT_PRESET_SDR;
     shader_injection.tone_map_type = TONE_MAP_VANILLA;
-    shader_injection.peak_white_nits = sdr_white_nits;
-    shader_injection.diffuse_white_nits = sdr_white_nits;
-    shader_injection.graphics_white_nits = sdr_white_nits;
+    shader_injection.peak_white_nits = 1.f;
+    shader_injection.diffuse_white_nits = 1.f;
+    shader_injection.graphics_white_nits = 1.f;
     shader_injection.gamma_correction = 0.f;
   }
 }
@@ -414,7 +396,7 @@ bool fired_on_init_swapchain = false;
 
 void OnInitSwapchain(reshade::api::swapchain* swapchain, bool resize) {
   if (!renodx::utils::swapchain::IsDXGI(swapchain)) return;
-  // A new or resized proxy swap chain starts in the HDR Format's colour space: set it again.
+  // A new or resized proxy swap chain starts in HDR10's colour space: set it again.
   proxy_color_space = reshade::api::color_space::unknown;
   if (fired_on_init_swapchain) return;
 
@@ -1097,13 +1079,11 @@ void OnBindRenderTargets(reshade::api::command_list* cmd_list, uint32_t count,
 void OnPresent(reshade::api::command_queue* queue, reshade::api::swapchain* swapchain, const reshade::api::rect* source_rect,
                const reshade::api::rect* dest_rect, uint32_t dirty_rect_count, const reshade::api::rect* dirty_rects) {
   auto* device = queue->get_device();
-  // The DX11 proxy presents too. Its swap chain's colour space follows Output Mode: HDR10 or sRGB
-  // for SDR on an HDR10 swap chain; an scRGB swap chain stays scRGB.
+  // The DX11 proxy presents too. Its HDR10 swap chain's colour space follows Output Mode: HDR10, or
+  // sRGB for SDR.
   if (device->get_api() != reshade::api::device_api::d3d9) {
-    reshade::api::color_space color_space = reshade::api::color_space::extended_srgb_linear;
-    if (renodx::mods::swapchain::target_format == reshade::api::format::r10g10b10a2_unorm) {
-      color_space = (IsHDR() ? reshade::api::color_space::hdr10_st2084 : reshade::api::color_space::srgb_nonlinear);
-    }
+    const reshade::api::color_space color_space =
+        (IsHDR() ? reshade::api::color_space::hdr10_st2084 : reshade::api::color_space::srgb_nonlinear);
     if (swapchain != proxy_swapchain || color_space != proxy_color_space) {
       renodx::utils::swapchain::ChangeColorSpace(swapchain, color_space);
       proxy_swapchain = swapchain;
@@ -1202,10 +1182,11 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved) {
       renodx::mods::swapchain::prevent_full_screen = false;
       renodx::mods::swapchain::force_screen_tearing = false;
       renodx::mods::swapchain::use_resource_cloning = true;
-      // The proxy sets the HDR Format's colour space on its swap chain, and OnPresent keeps it on
-      // Output Mode; the game's D3D9 swap chain stays SDR.
+      // The proxy sets HDR10's colour space on its swap chain, and OnPresent keeps it on Output Mode;
+      // the game's D3D9 swap chain stays SDR.
       renodx::mods::swapchain::set_color_space = false;
       renodx::mods::swapchain::use_device_proxy = true;
+      renodx::mods::swapchain::SetUseHDR10(true);
 
       renodx::mods::swapchain::swap_chain_proxy_vertex_shader = __swap_chain_proxy_vertex_shader_dx11;
       renodx::mods::swapchain::swap_chain_proxy_pixel_shader = __swap_chain_proxy_pixel_shader_dx11;
@@ -1272,8 +1253,6 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved) {
 
   renodx::utils::settings::Use(fdw_reason, &settings, &OnPresetOff);
   if (fdw_reason == DLL_PROCESS_ATTACH) {
-    // The proxy's swap chain format is fixed when it is created: apply the saved HDR Format before.
-    renodx::mods::swapchain::SetUseHDR10(hdr_format_setting->GetValue() == HDR_FORMAT_HDR10);
     UpdateOutput();
   }
   renodx::mods::swapchain::Use(fdw_reason, &shader_injection);

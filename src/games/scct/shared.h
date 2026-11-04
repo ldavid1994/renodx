@@ -27,7 +27,7 @@ struct ShaderInjectData {
   float tone_map_shadows;     // 1 = neutral
   float tone_map_contrast;    // 1 = neutral
 
-  float swap_chain_output_preset;  // set by the add-on from Output Mode and HDR Format
+  float swap_chain_output_preset;  // set by the add-on from Output Mode
   float tone_map_blowout;          // RenoDRT: highlight desaturation, 0 = off
   float padding0[2];
 };
@@ -122,8 +122,7 @@ cbuffer shader_injection : register(b13) {
 
 #endif
 
-// Output: the HDR10 and SDR presets set their own encoding; scRGB uses no preset, so SwapChainPass
-// keeps its defaults (scRGB, BT.709, no clamp or gamut compression).
+// Output: the HDR10 and SDR presets set their own encoding.
 
 #define RENODX_RENO_DRT_TONE_MAP_METHOD renodx::tonemap::renodrt::config::tone_map_method::REINHARD
 // The composite leaves the scene at Game Brightness 1 (white at 1.0, as the game drew it), so night
