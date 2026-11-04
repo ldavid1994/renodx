@@ -6,7 +6,7 @@
     "boostedwarr"
   ],
   "status": "experimental",
-  "summary": "Adds HDR10 and scRGB output with an SDR toggle, keeps highlights the game clipped, and adds PsychoV-30 and RenoDRT tone mapping with separate game and UI brightness.",
+  "summary": "Adds HDR10 and scRGB output with an SDR toggle, keeps highlights the game clipped, and adds RenoDRT tone mapping with separate game and UI brightness.",
   "deploy": {
     "steam_appid": 13570,
     "architecture": [

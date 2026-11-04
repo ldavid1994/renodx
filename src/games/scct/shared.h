@@ -6,12 +6,9 @@
 // Must be 32bit aligned. 4 x float4.
 // The composite replacement is ps_3_0, which has c0-c223; the game's own composite uses no float
 // constants, so the injection lives in c50-c53 (constant_buffer_offset = 50 * 4 in addon.cpp).
-// Tone Mapper values: Vanilla 0, None 1 and RenoDRT 3 are the framework's types; PsychoV-30 is this
-// mod's own.
-#define CUSTOM_TONE_MAP_TYPE_PSYCHO_V 4.f
-// Shadows at 100. Both tone mappers lift dark values by adding c * x^(2 - shadows); at 2 that is a
-// flat floor under everything above black (blotches, near-black colours blown up), so the slider
-// stops at 1.75.
+// Tone Mapper values: Vanilla 0, None 1 and RenoDRT 3, the framework's types.
+// Shadows at 100. RenoDRT lifts dark values by adding c * x^(2 - shadows); at 2 that is a flat floor
+// under everything above black (blotches, near-black colours blown up), so the slider stops at 1.75.
 #define CUSTOM_SHADOWS_MAX 1.75f
 
 struct ShaderInjectData {
@@ -30,12 +27,9 @@ struct ShaderInjectData {
   float tone_map_shadows;     // 1 = neutral
   float tone_map_contrast;    // 1 = neutral
 
-  // Computed by the add-on each frame from Peak / Game Brightness: the PsychoV-30 shadows and
-  // highlights that put it on vanilla below white. The sliders apply on top.
-  float psycho_shadows_match;
-  float psycho_highlights_match;
   float swap_chain_output_preset;  // set by the add-on from Output Mode and HDR Format
   float tone_map_blowout;          // RenoDRT: highlight desaturation, 0 = off
+  float padding0[2];
 };
 
 #ifdef __cplusplus
@@ -83,10 +77,8 @@ float4 shader_injection[4] : register(c50);
 #define RENODX_TONE_MAP_HIGHLIGHTS      shader_injection[2][1]
 #define RENODX_TONE_MAP_SHADOWS         shader_injection[2][2]
 #define RENODX_TONE_MAP_CONTRAST        shader_injection[2][3]
-#define CUSTOM_PSYCHO_SHADOWS_MATCH     shader_injection[3][0]
-#define CUSTOM_PSYCHO_HIGHLIGHTS_MATCH  shader_injection[3][1]
-#define RENODX_SWAP_CHAIN_OUTPUT_PRESET shader_injection[3][2]
-#define RENODX_TONE_MAP_BLOWOUT         shader_injection[3][3]
+#define RENODX_SWAP_CHAIN_OUTPUT_PRESET shader_injection[3][0]
+#define RENODX_TONE_MAP_BLOWOUT         shader_injection[3][1]
 
 // The add-on's own draws (Night Vision HDR, EMF HDR, the scene scale): their constants, after the
 // game's own (c0-c3), set for those draws only. Laid out as NightVisionConstants, EmfConstants and
@@ -125,8 +117,6 @@ cbuffer shader_injection : register(b13) {
 #define RENODX_TONE_MAP_HIGHLIGHTS      shader_injection.tone_map_highlights
 #define RENODX_TONE_MAP_SHADOWS         shader_injection.tone_map_shadows
 #define RENODX_TONE_MAP_CONTRAST        shader_injection.tone_map_contrast
-#define CUSTOM_PSYCHO_SHADOWS_MATCH     shader_injection.psycho_shadows_match
-#define CUSTOM_PSYCHO_HIGHLIGHTS_MATCH  shader_injection.psycho_highlights_match
 #define RENODX_SWAP_CHAIN_OUTPUT_PRESET shader_injection.swap_chain_output_preset
 #define RENODX_TONE_MAP_BLOWOUT         shader_injection.tone_map_blowout
 

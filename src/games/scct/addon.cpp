@@ -79,8 +79,8 @@ bool IsToneMapped() {
   return shader_injection.tone_map_type > TONE_MAP_VANILLA;
 }
 
-// Hue Shift and Blowout are RenoDRT's (draw.hlsl's ToneMapPass) and shown only with it: PsychoV-30
-// keeps the colour the game rendered, and None does no tone mapping.
+// Hue Shift and Blowout are RenoDRT's (draw.hlsl's ToneMapPass) and shown only with it: None does no
+// tone mapping.
 bool IsRenoDrt() {
   return shader_injection.tone_map_type == TONE_MAP_RENO_DRT;
 }
@@ -96,8 +96,8 @@ float SwapChainDecoding() {
   return shader_injection.gamma_correction + 1.f;
 }
 
-// Peak over Game Brightness: the headroom the tone mappers and the vision HDR roll off toward.
-// UpdateOutput keeps Peak at Game Brightness or above.
+// Peak over Game Brightness: the headroom the vision HDR rolls off toward. UpdateOutput keeps Peak
+// at Game Brightness or above.
 float PeakOverGame() {
   return shader_injection.peak_white_nits / (std::max)(shader_injection.diffuse_white_nits, 1.f);
 }
@@ -133,20 +133,18 @@ renodx::utils::settings::Settings settings = {
     tone_map_type_setting = new renodx::utils::settings::Setting{
         .key = "ToneMapType",
         .value_type = renodx::utils::settings::SettingValueType::INTEGER,
-        // RenoDRT, upstream's default, with Hue Shift for the clip's hue; PsychoV-30 stays an option.
+        // RenoDRT, upstream's default, with Hue Shift for the clip's hue.
         .default_value = 2.f,
         .can_reset = true,
         .label = "Tone Mapper",
         .section = "Tone Mapping",
         .tooltip = "Vanilla: the game's picture, clipped at white as in the original.\n"
                    "None: no highlight roll-off (clips at peak).\n"
-                   "RenoDRT: highlights above white are kept and rolled off toward peak.\n"
-                   "PsychoV-30: perceptual tone mapper; keeps hue and purity as highlights compress.",
+                   "RenoDRT: highlights above white are kept and rolled off toward peak.",
         // Menu index -> type: framework type 2 (ACES) isn't offered.
-        .labels = {"Vanilla", "None", "RenoDRT", "PsychoV-30"},
+        .labels = {"Vanilla", "None", "RenoDRT"},
         .is_enabled = &IsHDR,
         .parse = [](float value) {
-          if (value >= 3.f) return CUSTOM_TONE_MAP_TYPE_PSYCHO_V;
           if (value >= 2.f) return TONE_MAP_RENO_DRT;
           return value;
         },
@@ -382,35 +380,8 @@ void OnPresetOff() {
   renodx::utils::settings::UpdateSetting("FxEmfHdr", 0.f);
 }
 
-// PsychoV-30 settings that put it on vanilla below white (vanilla is the identity there): per Peak /
-// Game Brightness ratio, the shadows that match 0.2-10 nits and the highlights that match 50-203
-// nits, at Gamma Correction 2.2. Fitted on the GPU with psychotm_test30 on a grey ramp;
-// midtones then stay within 0.3-2.6%. Interpolated in log(ratio), clamped at the ends.
-struct PsychoMatch {
-  float ratio = 1.f;
-  float shadows = 1.f;
-  float highlights = 1.f;
-};
-constexpr PsychoMatch PSYCHO_MATCH[] = {
-    {.ratio = 1.25f, .shadows = 1.6964f, .highlights = 1.2922f},
-    {.ratio = 1.5f, .shadows = 1.6415f, .highlights = 1.2185f},
-    {.ratio = 2.f, .shadows = 1.5608f, .highlights = 1.1446f},
-    {.ratio = 2.5f, .shadows = 1.5026f, .highlights = 1.1077f},
-    {.ratio = 3.f, .shadows = 1.4575f, .highlights = 1.0855f},
-    {.ratio = 4.f, .shadows = 1.3908f, .highlights = 1.0603f},
-    {.ratio = 5.f, .shadows = 1.3427f, .highlights = 1.0464f},
-    {.ratio = 6.f, .shadows = 1.3060f, .highlights = 1.0376f},
-    {.ratio = 8.f, .shadows = 1.2526f, .highlights = 1.0271f},
-    {.ratio = 10.f, .shadows = 1.2155f, .highlights = 1.0211f},
-    {.ratio = 15.f, .shadows = 1.1575f, .highlights = 1.0135f},
-    {.ratio = 20.f, .shadows = 1.1238f, .highlights = 1.0098f},
-    {.ratio = 30.f, .shadows = 1.0863f, .highlights = 1.0063f},
-    {.ratio = 50.f, .shadows = 1.0531f, .highlights = 1.0036f},
-};
-
-// Writes what the shaders read from Output Mode, on the HDR Format chosen at startup, and the
-// PsychoV-30 match for the resulting Peak / Game Brightness. Run every game frame, so slider changes,
-// presets and Reset all reach the shaders through it.
+// Writes what the shaders read from Output Mode, on the HDR Format chosen at startup. Run every
+// game frame, so slider changes, presets and Reset all reach the shaders through it.
 void UpdateOutput() {
   const bool is_hdr10 = (renodx::mods::swapchain::target_format == reshade::api::format::r10g10b10a2_unorm);
   if (IsHDR()) {
@@ -433,25 +404,6 @@ void UpdateOutput() {
     shader_injection.graphics_white_nits = sdr_white_nits;
     shader_injection.gamma_correction = 0.f;
   }
-
-  // The match only depends on the peak the composite passes PsychoV-30. It was fitted at Gamma
-  // Correction 2.2, where that peak is pre-corrected (srgb::Decode(ratio^(1 / 2.2))); with Off it is
-  // the ratio itself, so look up the ratio whose pre-corrected peak equals it.
-  float match_ratio = PeakOverGame();
-  if (shader_injection.gamma_correction == 0.f) {
-    match_ratio = std::pow((1.055f * std::pow(match_ratio, 1.f / 2.4f)) - 0.055f, 2.2f);
-  }
-  const auto* first = std::begin(PSYCHO_MATCH);
-  const auto* last = std::end(PSYCHO_MATCH) - 1;
-  match_ratio = std::clamp(match_ratio, first->ratio, last->ratio);
-  const auto* upper = first + 1;
-  while (upper != last && upper->ratio < match_ratio) {
-    ++upper;
-  }
-  const auto* lower = upper - 1;
-  const float t = std::log(match_ratio / lower->ratio) / std::log(upper->ratio / lower->ratio);
-  shader_injection.psycho_shadows_match = std::lerp(lower->shadows, upper->shadows, t);
-  shader_injection.psycho_highlights_match = std::lerp(lower->highlights, upper->highlights, t);
 }
 
 // The proxy's DXGI swap chain and the colour space last set on it, kept on Output Mode in OnPresent.

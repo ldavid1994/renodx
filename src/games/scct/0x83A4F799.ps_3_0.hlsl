@@ -36,41 +36,9 @@ float4 main(float4 texcoord : TEXCOORD0) : COLOR {
     color = renodx::color::srgb::Decode(saturate(composite));
   }
   else {
-    float3 untonemapped = renodx::color::srgb::DecodeSafe(composite);
-    [branch] if (RENODX_TONE_MAP_TYPE == CUSTOM_TONE_MAP_TYPE_PSYCHO_V) {
-      // Peak in Game Brightness units. With Gamma Correction 2.2, RenderIntermediatePass maps
-      // sRGB-decoded values to 2.2-decoded ones, so the peak is pre-corrected the same way
-      // ToneMapPass does it. The add-on keeps it at 1 or more.
-      float peak = RENODX_PEAK_WHITE_NITS / RENODX_DIFFUSE_WHITE_NITS;
-      if (RENODX_GAMMA_CORRECTION > 0.f) {
-        peak = renodx::color::correct::Gamma(peak, true, 2.2f);
-      }
-      // Shadows below 50 darken with RenoDRT's curve (renodx::color::grade::ApplyUserColorGrading)
-      // before PsychoV-30: below 1, PsychoV-30's own shadow curve goes negative toward black, and its
-      // sign handling folds those pixels back up into blotches.
-      [branch] if (RENODX_TONE_MAP_SHADOWS < 1.f) {
-        const float y = renodx::color::y::from::BT709(untonemapped) / 0.18f;
-        const float y_shadowed = lerp(pow(y, 2.f - RENODX_TONE_MAP_SHADOWS), y, saturate(y));
-        untonemapped *= renodx::math::DivideSafe(y_shadowed, y, 0.f);
-      }
-      // The match values put PsychoV-30 on vanilla below white for this peak (the add-on computes
-      // them); the Highlights slider applies on top, so 50 = vanilla. Above 50, Shadows runs from
-      // the match to CUSTOM_SHADOWS_MAX, as RenoDRT's does from 1: at 2 PsychoV-30's shadow curve is a
-      // flat floor under everything above black, and past 2 it goes to infinity toward black.
-      color = renodx::tonemap::psychov::psychotm_test30(
-          untonemapped, peak,
-          RENODX_TONE_MAP_EXPOSURE,
-          RENODX_TONE_MAP_HIGHLIGHTS * CUSTOM_PSYCHO_HIGHLIGHTS_MATCH,
-          lerp(CUSTOM_PSYCHO_SHADOWS_MATCH, CUSTOM_SHADOWS_MAX,
-               saturate((RENODX_TONE_MAP_SHADOWS - 1.f) / (CUSTOM_SHADOWS_MAX - 1.f))),
-          RENODX_TONE_MAP_CONTRAST,
-          RENODX_TONE_MAP_SATURATION);
-    }
-    else {
-      // RenoDRT and None read exposure, highlights, shadows, contrast and saturation themselves,
-      // and RenoDRT also Hue Shift (toward the hue of the game's per-channel clip) and Blowout.
-      color = renodx::draw::ToneMapPass(untonemapped);
-    }
+    // RenoDRT and None read exposure, highlights, shadows, contrast and saturation themselves, and
+    // RenoDRT also Hue Shift (toward the hue of the game's per-channel clip) and Blowout.
+    color = renodx::draw::ToneMapPass(renodx::color::srgb::DecodeSafe(composite));
   }
   return float4(renodx::draw::RenderIntermediatePass(color), 1.f);
 }
