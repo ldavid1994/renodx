@@ -19,9 +19,14 @@ struct ShaderInjectData {
   float custom_dof;
   float custom_hue_clip;
   float custom_psychov_compression;
+  float custom_dlaa_debug_view;
 };
 
 #define CUSTOM_TONE_MAP_TYPE_PSYCHOV30 4.f
+// Clear value of the character motion texture where no motion was captured.
+#define CHARACTER_MOTION_UNKNOWN 32768.f
+// Value of the character motion texture where a tessellated skinned draw is the surface: read the tessellated motion.
+#define CHARACTER_MOTION_TESSELLATED -32768.f
 
 #ifndef __cplusplus
 #if ((__SHADER_TARGET_MAJOR == 5 && __SHADER_TARGET_MINOR >= 1) || __SHADER_TARGET_MAJOR >= 6)
@@ -47,8 +52,10 @@ cbuffer shader_injection : register(b13) {
 #define CUSTOM_DOF                  shader_injection.custom_dof
 #define CUSTOM_HUE_CLIP             shader_injection.custom_hue_clip
 #define CUSTOM_PSYCHOV_COMPRESSION  shader_injection.custom_psychov_compression
+#define CUSTOM_DLAA_DEBUG_VIEW      shader_injection.custom_dlaa_debug_view
 
-// HDR10 output with no peak clamp; the rest are draw.hlsl's defaults.
+// No peak clamp in the tone map pass (the swap chain proxy scales down colors whose largest channel exceeds Peak
+// Brightness); the rest are draw.hlsl's defaults.
 #define RENODX_TONE_MAP_CLAMP_PEAK             renodx::color::convert::COLOR_SPACE_NONE
 #define RENODX_SWAP_CHAIN_CLAMP_COLOR_SPACE    renodx::color::convert::COLOR_SPACE_BT2020
 #define RENODX_SWAP_CHAIN_ENCODING             renodx::draw::ENCODING_PQ

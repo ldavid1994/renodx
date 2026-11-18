@@ -15,8 +15,8 @@ void main(
     out float4 o0: SV_Target0) {
   float4 scene = t0.Sample(s0_s, v0.xy);
 
-  // max(0) drops NaN. The blurs average this target, so capping here reproduces the original's blur exactly;
-  // the HDR tone mappers keep the float range for valid pixels.
+  // max(0) drops NaN. The blurs average this target, so capping here reproduces the original's blur, apart from the
+  // UNORM target's 16-bit rounding; the HDR tone mappers keep the float range for valid pixels.
   float3 downsampled = 0.25f * max(0, scene.rgb);
   if (RENODX_TONE_MAP_TYPE == renodx::draw::TONE_MAP_TYPE_VANILLA) {
     o0.rgb = saturate(downsampled);

@@ -38,7 +38,7 @@ float3 DropGarbage(float3 scene) {
   return (RENODX_TONE_MAP_TYPE != renodx::draw::TONE_MAP_TYPE_VANILLA && IsGarbageColor(scene)) ? 0.f : scene;
 }
 
-// Adds the bloom (a thresholded bright pass: added, not lerped), then grades and renders. max(0) keeps the scene's
+// Adds the bloom (a thresholded bright pass) in linear light, then grades and renders. max(0) keeps the scene's
 // negatives out of the 2.2 encode.
 float4 GradeAndRender(float3 untonemapped, float3 bloom, Texture2D<float4> lut, SamplerState lut_sampler) {
   untonemapped = max(0, untonemapped + bloom * CUSTOM_BLOOM);

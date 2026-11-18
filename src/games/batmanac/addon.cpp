@@ -28,6 +28,7 @@
 #include "../../utils/settings.hpp"
 #include "../../utils/swapchain.hpp"
 #include "./shared.h"
+#include "./dlaa.hpp"
 
 namespace {
 
@@ -429,7 +430,8 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved) {
             },
         };
         // The DOF blur targets store the scene / 4 in UNORM, clipping blurred lights at 4 linear.
-        // Their size is set from the game window's back buffer in OnInitSwapchain; 1x1 matches nothing until then.
+        // Their size is set from the game window's back buffer in OnInitSwapchain; until then only a 1x1 target of that
+        // format matches.
         renodx::mods::swapchain::resource_upgrade_infos.push_back({
             .old_format = reshade::api::format::r16g16b16a16_unorm,
             .new_format = reshade::api::format::r16g16b16a16_float,
@@ -459,6 +461,47 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved) {
         prevent_full_screen_setting->ReadFromConfig(renodx::utils::settings::global_name);
         renodx::mods::swapchain::prevent_full_screen = (prevent_full_screen_setting->GetValue() == 1.f);
 
+        settings.push_back(new renodx::utils::settings::Setting{
+            .key = "DLAA",
+            .binding = &batmanac::dlaa::dlaa_enabled,
+            .value_type = renodx::utils::settings::SettingValueType::INTEGER,
+            .default_value = 0.f,
+            .label = "DLAA",
+            .section = "Anti-Aliasing",
+            .tooltip =
+                "NVIDIA DLAA. Needs an NVIDIA RTX GPU and anti-aliasing off in the game's launcher (no MSAA, no FXAA).\n"
+                "With MSAA on, or if DLAA cannot start, it turns itself off and the game's image stays as it is.",
+            .labels = {"Off", "On"},
+            .is_visible = []() { return batmanac::dlaa::dlaa_supported; },
+        });
+        settings.push_back(new renodx::utils::settings::Setting{
+            .key = "DLAAPreset",
+            .binding = &batmanac::dlaa::dlaa_preset,
+            .value_type = renodx::utils::settings::SettingValueType::INTEGER,
+            .default_value = 2.f,
+            .label = "DLAA Preset",
+            .section = "Anti-Aliasing",
+            .tooltip =
+                "K: steadiest on railings and grates, but falling snow and animated lights fade.\n"
+                "L: keeps snow and animated lights, with more shimmer on thin geometry.",
+            .labels = {"Default", "J", "K", "L", "M"},
+            // Menu index -> NVSDK_NGX_DLSS_Hint_Render_Preset: J is 10, then one per letter.
+            .parse = [](float value) { return (value == 0.f ? 0.f : value + 9.f); },
+            .is_visible = []() { return batmanac::dlaa::dlaa_enabled != 0.f; },
+        });
+#ifndef NDEBUG
+        settings.push_back(new renodx::utils::settings::Setting{
+            .key = "DLAADebugView",
+            .binding = &shader_injection.custom_dlaa_debug_view,
+            .value_type = renodx::utils::settings::SettingValueType::INTEGER,
+            .default_value = 0.f,
+            .label = "DLAA Debug View",
+            .section = "Anti-Aliasing",
+            .labels = {"Off", "Motion Vectors", "Character Motion"},
+            .is_visible = []() { return batmanac::dlaa::dlaa_enabled != 0.f; },
+        });
+#endif
+
         initialized = true;
       }
 
@@ -474,6 +517,7 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved) {
   renodx::utils::settings::Use(fdw_reason, &settings, &OnPresetOff);
   renodx::mods::swapchain::Use(fdw_reason, &shader_injection);
   renodx::mods::shader::Use(fdw_reason, custom_shaders, &shader_injection);
+  batmanac::dlaa::Use(fdw_reason, &shader_injection);
 
   return TRUE;
 }

@@ -839,6 +839,19 @@ foreach(FILE ${ADDON_FILES})
   )
 endforeach()
 
+if(RENODX_TARGET_ARCHITECTURE STREQUAL "x64")
+  # Batman: Arkham City is a 32-bit game and DLSS only ships for x64: its DLAA runs in this helper process.
+  add_executable(batmanac_dlaa_host64 WIN32 src/games/batmanac/dlaa_host64.cpp)
+  target_compile_definitions(batmanac_dlaa_host64 PRIVATE NOMINMAX UNICODE _UNICODE)
+  target_include_directories(batmanac_dlaa_host64 SYSTEM PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/external/DLSS/include)
+  target_link_libraries(batmanac_dlaa_host64 PRIVATE d3d11 dxgi ${CMAKE_CURRENT_SOURCE_DIR}/external/DLSS/lib/Windows_x86_64/x64/nvsdk_ngx_s.lib)
+  # nvsdk_ngx_s.lib is built against the release static runtime.
+  set_target_properties(batmanac_dlaa_host64 PROPERTIES
+    MSVC_RUNTIME_LIBRARY "MultiThreaded"
+    OUTPUT_NAME "renodx-batmanac-dlaa-host64"
+  )
+endif()
+
 list(LENGTH SKIPPED_ADDON_TARGETS SKIPPED_ADDON_TARGET_COUNT)
 message(STATUS "Skipped ${SKIPPED_ADDON_TARGET_COUNT} game addon targets not listed for ${RENODX_TARGET_ARCHITECTURE}")
 

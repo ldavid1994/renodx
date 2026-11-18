@@ -2,7 +2,7 @@
 
 HDR for the Steam GOTY release (DX11, 32-bit). Needs ReShade with add-on support installed as `dxgi.dll` next to `Binaries\Win32\BatmanAC.exe`. Use the game's DX11 renderer.
 
-The main story was played and checked end to end; Harley Quinn's Revenge and the challenge maps had spot checks only. The add-on replaces the tonemap uber pass (`0xD160F56A`, `0x2151085D` with Motion Blur on, or `0x280F18BC` with a bokeh depth of field), the detective-mode final pass (`0xC1C294D3`, also Catwoman's thief vision), the LUT builders (`0x3207DF59`, and its variant `0xC240CBE6` that adds a texture to the table coordinates; their 256x16 table upgraded to RGBA16F), the DOF downsample (`0x46BA7BD5`, the blur targets upgraded to RGBA16F) and the bloom bright pass (`0x25455918`, its taps capped at 1 as the original blur target did) and four smoke and flame sheet materials (`0x8E23494B`, `0x2A25E549`, `0xB720ADD7`, `0xE6F50BDA`, for the flame cores below) and a lightmapped surface material (`0x63BA77AD`, its vertex color clamped to 0..1 outside Vanilla: MSAA edge pixels extrapolated it into single pixels thousands of times past white, which the float blur spread into glowing blobs), upgrades the back-buffer-sized target FXAA reads to RGBA16F (FXAA itself only blends, so both FXAA settings keep HDR), and outputs HDR10 on a borderless flip-model swap chain. HDR comes from the game's float scene before its clip at white. Tone Mapper Vanilla matches the game's shaders, apart from 8-bit rounding: the LUT's table and FXAA's input are RGBA16F (under one 8-bit step; with FXAA, a few edge pixels anti-alias slightly differently); PsychoV-30, the default, matches Vanilla within 1% below white and rolls highlights off toward Peak.
+The main story was played and checked end to end; Harley Quinn's Revenge and the challenge maps had spot checks only. The add-on replaces the tonemap uber pass (`0xD160F56A`, `0x2151085D` with Motion Blur on, or `0x280F18BC` with a bokeh depth of field), the detective-mode final pass (`0xC1C294D3`, also Catwoman's thief vision), the LUT builders (`0x3207DF59`, and its variant `0xC240CBE6` that adds a texture to the table coordinates; their 256x16 table upgraded to RGBA16F), the DOF downsample (`0x46BA7BD5`, the blur targets upgraded to RGBA16F) and the bloom bright pass (`0x25455918`, its taps capped at 1 as the original blur target did) and four smoke and flame sheet materials (`0x8E23494B`, `0x2A25E549`, `0xB720ADD7`, `0xE6F50BDA`, for the flame cores below), upgrades the back-buffer-sized target FXAA reads to RGBA16F (FXAA itself only blends, so both FXAA settings keep HDR), and outputs HDR10 on a borderless flip-model swap chain. HDR comes from the game's float scene before its clip at white. Tone Mapper Vanilla matches the game's shaders, apart from 8-bit rounding: the LUT's table and FXAA's input are RGBA16F (under one 8-bit step; with FXAA, a few edge pixels anti-alias slightly differently); PsychoV-30, the default, matches Vanilla within 1% below white and rolls highlights off toward Peak.
 
 ## Settings
 
@@ -11,6 +11,7 @@ The main story was played and checked end to end; Harley Quinn's Revenge and the
 - **Gamma Correction:** 2.2 (default) shows the game as a typical SDR display does; Off decodes it as sRGB.
 - **Color Grading:** Exposure, Highlights, Shadows, Contrast and Saturation work with None and PsychoV-30. **Scene Grading** scales the game's color grade. **Bloom** and **Depth of Field** scale the game's bloom and blur (50 is the game's, 0 turns them off), also under Vanilla. Lens flares are the launcher's switch. Keep Depth of Field on in the launcher: turning it off there makes the game skip its color grade; use the slider instead.
 - **Preset Off** switches to Vanilla at 203 nits. Force Borderless and Prevent Fullscreen (Advanced) stay on for HDR.
+- **DLAA** (Anti-Aliasing, off by default) and **DLAA Preset**: K (default) is the steadiest on railings and grates; L keeps falling snow and animated lights, with more shimmer on thin geometry. See DLAA below.
 
 ## Flame cores
 
@@ -19,6 +20,16 @@ The game's flame sheets mix a cool color at their thin edges toward a hot color 
 ## In-game brightness
 
 Leave the game's own brightness slider at its default (the middle) and set brightness with Game Brightness. The game's slider is a gamma on its SDR image (baked into the color-grade LUT, and the exponent of the detective-mode pass), so it still works with every tone mapper, lifting shadows and midtones on top of Game Brightness.
+
+## DLAA
+
+NVIDIA DLAA (DLSS at native resolution). Needs an NVIDIA RTX GPU and anti-aliasing off in the game's launcher (no MSAA, no FXAA).
+
+- **Helper process:** DLSS ships only for 64-bit programs, so `renodx-batmanac-dlaa-host64.exe` runs it next to the 32-bit game. Both files go in `Binaries\Win32`, together with `nvngx_dlss.dll` (DLSS 310 or newer, not included). The add-on starts the helper when DLAA is turned on. They share the textures and hand frames over through a shared D3D11 fence: after the first frame the game's CPU doesn't wait for the helper, and a watcher thread signals the fence if the helper dies so the game's GPU can't hang. This design follows ATN's DLAA helper for Total War: Attila.
+- **Where it runs:** after the scene fog, on the linear HDR scene, before the translucents, depth of field, bloom, motion blur and the tonemap. Particles, weather and the menu overlay are drawn after it.
+- **Inputs:** the camera is jittered over 32 Halton phases and textures get a -1 LOD bias while DLAA runs. Motion vectors come from the camera (jitter removed), plus each moving object's own motion: skinned characters, tessellated meshes (Clayface, Poison Ivy's pods), CPU-simulated cloth (capes, coats) and PhysX meshes (papers, debris). Their vertex positions are streamed out each frame and the previous frame's are replayed.
+- **Turning itself off:** with MSAA on, on a non-NVIDIA GPU (the setting is then hidden) or when the helper can't start or stops, DLAA turns off and the game's image stays as it is. It stays off until the game restarts. `ReShade.log` gives the reason (`batmanac DLAA: ...; DLAA off`); the helper writes `renodx-batmanac-dlaa-host64.log`.
+- **Cost:** on an RTX 5090 at 3840x2160 with preset K, DLAA costs about 1.4 ms per frame without GPU PhysX (smelting chamber 2.87 → 4.25 ms, courthouse 3.12 → 4.51 ms). With GPU PhysX High it costs about 1–2 ms, depending on the spot: where PhysX already holds the frame back, part of DLAA's work fits into the gaps (courthouse 7.22 → 8.16 ms); where PhysX particles keep the GPU busy, PhysX's GPU work waits behind DLAA's, about 0.5 ms more (smelting chamber 4.35 → 6.29 ms, open world 6.11 → 8.00 ms). PhysX High by itself costs about 1.5 ms in the smelting chamber. On slower GPUs, PhysX Normal or a dedicated PhysX GPU helps. Close programs that draw on the GPU in the background, such as a browser: an idle browser took about 12% of the GPU's 3D engine in one measurement, which PhysX and DLAA then wait behind.
 
 ## Building
 
@@ -31,7 +42,9 @@ Run from the repository root inside the Visual Studio developer shell for x86 (`
 
 Both make `renodx-batmanac.addon32`. Copy it into `Binaries\Win32` with the game closed.
 
-The build writes each replaced shader to `build32/batmanac.include/embed/`: `0xD160F56A.h`, `0x2151085D.h`, `0x280F18BC.h`, `0xC1C294D3.h`, `0x3207DF59.h`, `0xC240CBE6.h`, `0x46BA7BD5.h`, `0x25455918.h`, `0x8E23494B.h`, `0x2A25E549.h`, `0xB720ADD7.h`, `0xE6F50BDA.h`, `0x63BA77AD.h`, and the proxy's `swap_chain_proxy_vertex_shader_dx11.h` and `swap_chain_proxy_pixel_shader_dx11.h`; `shaders.h` lists them.
+The DLAA helper is a 64-bit program: in the developer shell for x64 (`vcvarsall.bat x64`), run `cmake --preset clang-x64` once, then `cmake --build --preset clang-x64-release --target batmanac_dlaa_host64`. It writes `build/Release/renodx-batmanac-dlaa-host64.exe`; copy it next to the add-on.
+
+The build writes each replaced shader to `build32/batmanac.include/embed/`: `0xD160F56A.h`, `0x2151085D.h`, `0x280F18BC.h`, `0xC1C294D3.h`, `0x3207DF59.h`, `0xC240CBE6.h`, `0x46BA7BD5.h`, `0x25455918.h`, `0x8E23494B.h`, `0x2A25E549.h`, `0xB720ADD7.h`, `0xE6F50BDA.h`, and the proxy's `swap_chain_proxy_vertex_shader_dx11.h` and `swap_chain_proxy_pixel_shader_dx11.h`; `shaders.h` lists them.
 
 ## Verification
 
@@ -42,6 +55,7 @@ The build writes each replaced shader to `build32/batmanac.include/embed/`: `0xD
 5. Detective mode (or Catwoman's thief vision) on: the picture changes to the detective look, with no black frame or washed-out image.
 6. The settings that a tone mapper doesn't use are hidden (PsychoV-30-only) or grayed out (under Vanilla); Preset Off switches to Vanilla.
 7. Flame cores, a paused frame at the Steel Mill wall fires (or the Clayface floor fire): under PsychoV-30 the flames' cores are no longer a flat patch darker than their red edges; Vanilla shows the game's clipped original. Gray smoke and the Gotham window fires match Vanilla below white.
+8. DLAA (MSAA and FXAA off in the launcher, `nvngx_dlss.dll` in `Binaries\Win32`): turning it on starts `renodx-batmanac-dlaa-host64.exe`, edges are smooth, and a camera pan leaves no smearing on scenery, Batman's cape or the enemies. With MSAA on, `ReShade.log` shows `batmanac DLAA: the scene is multisampled; ...; DLAA off`.
 
 ## Known risks
 
@@ -49,5 +63,7 @@ The build writes each replaced shader to `build32/batmanac.include/embed/`: `0xD
 - **Subtitles over very bright lamps** can be hard to read under PsychoV-30: they have no backing box, and lamps behind them reach several times UI Brightness where Vanilla clipped them at white. A fix would need intercepting every UI draw after the tonemap; RenoDX maintainers judged that not worth it without frame generation.
 - **The flame-core fix acts on every emissive use of these materials.** An untested effect whose cool color is above white and whose hot color is dimmer would also be brightened; Vanilla shows the original for comparison. Around a brightened core the flame's edge takes on the core's paler color, where Vanilla shows a red-pink outline. Two more sprite materials with the same flat-core pattern (`0x63FAD3EF`, `0xCE5AB695`) aren't replaced, as they never appeared in testing; a flat fire core elsewhere would point to them. Hard-edged fire art (the Steel Mill walls) still ends in an abrupt edge where the core meets its orange rim: that edge is in the art, which the game's clip at white hid.
 - **The bokeh uber pass `0x280F18BC` draws the game-over screen** after Batman dies (the villain's taunt, for example the Joker, over a dark background). Its depth of field is a 13x13 bokeh gather over the scene; Depth of Field scales the bokeh radius, so above 50 the blur grows only up to that 13x13 kernel.
+- **MSAA is not recommended.** With MSAA, edge pixels of the lightmapped surface material `0x63BA77AD` extrapolate its vertex color into single pixels thousands of times past white; Vanilla clips them to a dotted line, and the HDR tone mappers and the float blur turn them into glowing blobs. Use FXAA or DLAA instead.
+- **DLAA's limits.** A skinned mesh coming back into view has no previous frame, so its first frame uses camera motion; plants near Poison Ivy can flash for a frame when the camera's view pairing switches.
 - **MSAA allocates two unused back-buffer-sized targets** (a multisampled one and its resolve texture) that match the FXAA input upgrade. Both are upgraded to RGBA16F so their formats stay equal (upgrading only one crashes the game); the cost is extra video memory, no visual change.
 - **32:9 and other non-16:9 resolutions are untested.** The DOF blur upgrade matches the blur by size, computed as back buffer / 4 + 2 (checked at 3840x2160, 2560x1440 and 1920x1080). If another aspect ratio rounds differently, the blur stays at the game's `RGBA16_UNORM` and blurred lights cap at 4× white, as in the original; nothing else breaks. The FXAA input upgrade matches the back buffer's exact size, so it follows any resolution (checked at 3840x2160 only).

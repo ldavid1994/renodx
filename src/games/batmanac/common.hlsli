@@ -38,7 +38,7 @@ float3 MatchHotLuminance(float3 cool_color, float3 hot_color) {
 }
 
 // Renders a pass's encoded output: decoded as sRGB, as Vanilla does; Gamma Correction then shows it as a 2.2 display
-// would. PsychoV-30 and None tone map it. Clips nothing: the passes keep Vanilla's clip themselves.
+// would. PsychoV-30 tone maps it and None grades it; Vanilla's clip at white is done by the passes themselves.
 float3 RenderEncoded(float3 encoded) {
   float3 color = renodx::color::srgb::DecodeSafe(encoded);
   [branch]
