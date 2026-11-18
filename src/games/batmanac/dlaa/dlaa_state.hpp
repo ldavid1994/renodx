@@ -24,7 +24,7 @@
 
 #include <include/reshade.hpp>
 
-#include "./shared.h"
+#include "../shared.h"
 
 // State the DLAA passes share: the views the game thread queues for the render thread and their pairing, each
 // moving draw's captured data, the frame's motion batches and the settings.

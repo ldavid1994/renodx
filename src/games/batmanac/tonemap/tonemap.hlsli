@@ -4,8 +4,8 @@
 // Tonemap uber pass: DOF and bloom in linear, then pow(1 / 2.2), min(1) and a 16^3 LUT.
 // The HDR tone mappers grade through the LUT by the max channel rolled off past BRIDGE_ANCHOR, then scale back.
 
-#include "./common.hlsli"
-#include "../../shaders/tonemap/c_infinity_rolloff.hlsl"
+#include "../common.hlsli"
+#include "../../../shaders/tonemap/c_infinity_rolloff.hlsl"
 
 // Linear max channel where the bridge's roll-off into the LUT starts; below it the roll-off and its inverse are the
 // identity. The roll-off is Musa's CInfinityRollOff.

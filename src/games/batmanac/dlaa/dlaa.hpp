@@ -26,14 +26,14 @@
 #include <embed/shaders.h>
 #include <include/reshade.hpp>
 
-#include "../../utils/detour.hpp"
-#include "../../utils/hash.hpp"
-#include "../../utils/state.hpp"
+#include "../../../utils/detour.hpp"
+#include "../../../utils/hash.hpp"
+#include "../../../utils/state.hpp"
 #include "./dlaa_host.hpp"
 #include "./dlaa_motion.hpp"
 #include "./dlaa_particles.hpp"
 #include "./dlaa_state.hpp"
-#include "./shared.h"
+#include "../shared.h"
 
 // NVIDIA DLAA for a game without temporal AA. The player view's projection matrix is jittered where
 // ULocalPlayer::CalcSceneView hands it to the FSceneView constructor: every matrix the renderer derives from it

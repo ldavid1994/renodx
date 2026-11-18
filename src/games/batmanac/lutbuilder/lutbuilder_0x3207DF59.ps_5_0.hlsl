@@ -1,7 +1,7 @@
 // LUT builder 0x3207DF59: the uber pass's 16^3 LUT strip (256x16) from the area's grade and the brightness slider.
 // Its target is RGBA16F now: the HDR tone mappers keep the grade above 1, Vanilla clamps as the UNORM target did.
 
-#include "./shared.h"
+#include "../shared.h"
 
 cbuffer cb0 : register(b0) {
   float4 cb0[9];

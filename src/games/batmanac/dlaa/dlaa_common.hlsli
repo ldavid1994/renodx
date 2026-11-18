@@ -1,6 +1,6 @@
 // Shared by the DLAA input and composite passes: the scene and the per-frame constants.
 
-#include "./shared.h"
+#include "../shared.h"
 
 // rgb: jittered scene color, a: device depth of the inverted depth buffer, 1 - z of the CPU projection matrix.
 Texture2D<float4> scene_texture : register(t0);

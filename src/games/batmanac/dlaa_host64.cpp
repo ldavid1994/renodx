@@ -23,7 +23,7 @@
 #include <nvsdk_ngx.h>
 #include <nvsdk_ngx_helpers.h>
 
-#include "./dlaa_shared.h"
+#include "./dlaa/dlaa_shared.h"
 
 namespace {
 

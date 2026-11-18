@@ -1,7 +1,7 @@
 // Detective-mode final pass 0xC1C294D3: saturate(lerp(scene * tint, color, fade)), then pow(cb0[2].x).
 // The HDR tone mappers drop the saturate; under PsychoV-30, Hue Clip emulates its hue bend.
 
-#include "./common.hlsli"
+#include "../common.hlsli"
 
 Texture2D<float4> t0 : register(t0);
 SamplerState s0_s : register(s0);

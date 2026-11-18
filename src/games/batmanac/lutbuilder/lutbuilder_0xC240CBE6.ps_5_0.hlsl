@@ -1,7 +1,7 @@
 // LUT builder 0xC240CBE6: 0x3207DF59's LUT strip with a texture (t0, weighted by cb0[9].x) added to its coordinates.
 // Its target is RGBA16F now: the HDR tone mappers keep the grade above 1, Vanilla clamps as the UNORM target did.
 
-#include "./shared.h"
+#include "../shared.h"
 
 Texture2D<float4> t0 : register(t0);
 

@@ -28,7 +28,7 @@
 #include "../../utils/settings.hpp"
 #include "../../utils/swapchain.hpp"
 #include "./shared.h"
-#include "./dlaa.hpp"
+#include "./dlaa/dlaa.hpp"
 
 namespace {
 

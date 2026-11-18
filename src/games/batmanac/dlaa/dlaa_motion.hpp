@@ -23,10 +23,10 @@
 #include <embed/shaders.h>
 #include <include/reshade.hpp>
 
-#include "../../utils/state.hpp"
+#include "../../../utils/state.hpp"
 #include "./dlaa_host.hpp"
 #include "./dlaa_state.hpp"
-#include "./shared.h"
+#include "../shared.h"
 
 // Per-object motion: moving draws stream out their positions; one pass per frame draws the batched motion before
 // DLAA reads it, and a tessellated draw draws its own.
