@@ -1,0 +1,17 @@
+{
+  "$schema": "https://cdn.jsdelivr.net/gh/clshortfuse/renodx/renodx-metadata-schema.json",
+  "id": "batmanac",
+  "title": "Batman: Arkham City",
+  "maintainers": [
+    "boostedwarr"
+  ],
+  "status": "experimental",
+  "deploy": {
+    "steam_appid": 200260,
+    "game_exe": "BatmanAC.exe",
+    "api": "d3d11",
+    "architecture": [
+      "x86"
+    ]
+  }
+}
