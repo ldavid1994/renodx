@@ -38,11 +38,13 @@
 // NVIDIA DLAA for a game without temporal AA. The player view's projection matrix is jittered where
 // ULocalPlayer::CalcSceneView hands it to the FSceneView constructor: every matrix the renderer derives from it
 // (view-projection, its inverse, screen to shadow) stays consistent. Before the first post pass, which reads the scene
-// with device depth in alpha, compute passes write DLSS's inputs, the 64-bit host runs DLAA and its output replaces
+// with 1 - device depth in alpha, compute passes write DLSS's inputs, the 64-bit host runs DLAA and its output replaces
 // the scene.
 namespace batmanac::dlaa {
 
 static void* scene_view_trampoline = nullptr;
+// The game's device: the first one created while none is tracked. Other devices leave DLAA alone.
+static reshade::api::device* dlaa_device = nullptr;
 
 static void __cdecl OnCalcSceneView(Matrix4* view_matrix, Matrix4* projection_matrix) {
   const std::unique_lock lock(view_queue.mutex);
@@ -707,7 +709,7 @@ static void OnInitSampler(reshade::api::device* device, const reshade::api::samp
   if (game_sampler == nullptr) return;
   D3D11_SAMPLER_DESC sampler_desc = {};
   game_sampler->GetDesc(&sampler_desc);
-  // Bit 0 of the filter selects linear mip filtering; anisotropic filters set it too.
+  // Only samplers with linear mip filtering (bit 0; anisotropic filters set it too): point-mip samplers are the post passes'.
   if ((sampler_desc.Filter & 0x1) == 0 || sampler_desc.MaxLOD <= 0.f) return;
   ID3D11Device* native_device = nullptr;
   game_sampler->GetDevice(&native_device);
@@ -882,6 +884,8 @@ static void OnInitPipeline(
 }
 
 static void OnInitDevice(reshade::api::device* device) {
+  if (dlaa_device != nullptr) return;
+  dlaa_device = device;
   if (scene_view_trampoline != nullptr) return;
 
   auto* image = reinterpret_cast<std::byte*>(GetModuleHandleW(nullptr));
@@ -934,6 +938,8 @@ static void OnInitDevice(reshade::api::device* device) {
 
 
 static void OnDestroyDevice(reshade::api::device* device) {
+  if (device != dlaa_device) return;
+  dlaa_device = nullptr;
   DestroyOutputs(device);
   if (resolve_state.prepare_pipeline.handle != 0u) {
     device->destroy_pipeline(resolve_state.prepare_pipeline);
@@ -1022,6 +1028,7 @@ static void OnPresent(
     const reshade::api::rect* dest_rect,
     uint32_t dirty_rect_count,
     const reshade::api::rect* dirty_rects) {
+  if (swapchain->get_device() != dlaa_device) return;
   const reshade::api::resource_desc back_buffer_desc = swapchain->get_device()->get_resource_desc(swapchain->get_current_back_buffer());
   ++resolve_state.frame_index;
   dlaa_resolving.store(resolve_state.last_resolve_frame != UINT64_MAX && resolve_state.last_resolve_frame + 2u >= resolve_state.frame_index);
