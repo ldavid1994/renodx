@@ -6,6 +6,7 @@
     "boostedwarr"
   ],
   "status": "experimental",
+  "summary": "HDR10 with optional NVIDIA DLAA through a 64-bit helper",
   "deploy": {
     "steam_appid": 200260,
     "game_exe": "BatmanAC.exe",
