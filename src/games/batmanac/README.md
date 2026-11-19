@@ -19,7 +19,7 @@ The game's flame sheets mix a cool color at their thin edges toward a hot color 
 
 ## In-game brightness
 
-Leave the game's own brightness slider at its default (the middle) and set brightness with Game Brightness. The game's slider is a gamma on its SDR image (baked into the color-grade LUT, and the exponent of the detective-mode pass), so it still works with every tone mapper, lifting shadows and midtones on top of Game Brightness.
+Leave the in-game brightness slider at its default (the middle) and set brightness with Game Brightness. The game's slider is a gamma on its SDR image (baked into the color-grade LUT, and the exponent of the detective-mode pass), so it still works with every tone mapper, lifting shadows and midtones on top of Game Brightness.
 
 ## Anti-aliasing (DLAA and FSR)
 
