@@ -217,6 +217,14 @@ struct ResolveState {
   ID3D11DepthStencilState* tessellated_depth_state = nullptr;
   ID3D11VertexShader* motion_world_vertex_shader = nullptr;
   ID3D11PixelShader* tessellated_mask_shader = nullptr;
+  // Device depth of the tessellated skinned surfaces as their draws rasterized them (1 where none), marked in the mask at
+  // the end of the frame only where nothing nearer was drawn over them later.
+  ID3D11Texture2D* tessellated_surface_depth = nullptr;
+  ID3D11DepthStencilView* tessellated_surface_dsv = nullptr;
+  ID3D11ShaderResourceView* tessellated_surface_srv = nullptr;
+  ID3D11DepthStencilState* tessellated_surface_test_state = nullptr;
+  // The main depth this frame's tessellated draws drew into (referenced), for that test.
+  ID3D11DepthStencilView* tessellated_surface_depth_view = nullptr;
 };
 
 struct UpscalingConstants {

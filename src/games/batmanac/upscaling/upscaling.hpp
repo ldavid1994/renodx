@@ -126,7 +126,6 @@ constexpr UINT UPSCALING_SHADER_RESOURCES = 6u;
 // scene_srv: a view of the scene, or null when the scene is the bound render target (it is then unbound and read through
 // a cached view).
 static bool Resolve(reshade::api::command_list* cmd_list, reshade::api::resource scene, reshade::api::resource_view scene_srv) {
-  DrawBatchedMotion(reinterpret_cast<ID3D11DeviceContext*>(cmd_list->get_native()));
   auto* device = cmd_list->get_device();
   const reshade::api::resource_desc scene_desc = device->get_resource_desc(scene);
   // With MSAA on, the full-screen scene and the main depth are multisampled: the upscaler would only run later on the game's
@@ -140,6 +139,8 @@ static bool Resolve(reshade::api::command_list* cmd_list, reshade::api::resource
     ++resolve_state.scene_skips;
     return false;
   }
+  // Drawn once the scene is accepted: a skipped scene can be followed by the real one, with more draws in front.
+  DrawBatchedMotion(reinterpret_cast<ID3D11DeviceContext*>(cmd_list->get_native()));
 
   ViewMatrices current_view;
   std::array<std::array<float, 2>, VIEW_CANDIDATES> candidate_jitter = {};
@@ -1149,7 +1150,8 @@ static void OnPresent(
     constexpr std::array<float, 4> MOTION_CLEAR_COLOR = {CHARACTER_MOTION_UNKNOWN, CHARACTER_MOTION_UNKNOWN, 0.f, 0.f};
     immediate_context->ClearRenderTargetView(resolve_state.character_motion_rtv, MOTION_CLEAR_COLOR.data());
     immediate_context->ClearRenderTargetView(resolve_state.tessellated_motion_rtv, MOTION_CLEAR_COLOR.data());
-    immediate_context->ClearDepthStencilView(resolve_state.tessellated_depth_dsv, D3D11_CLEAR_DEPTH, 0.f, 0u);
+    immediate_context->ClearDepthStencilView(resolve_state.tessellated_depth_dsv, D3D11_CLEAR_DEPTH, 1.f, 0u);
+    immediate_context->ClearDepthStencilView(resolve_state.tessellated_surface_dsv, D3D11_CLEAR_DEPTH, 1.f, 0u);
   }
   resolve_state.draw_occurrences.clear();
   resolve_state.older_uploaded_vertex_buffers = std::move(resolve_state.previous_uploaded_vertex_buffers);

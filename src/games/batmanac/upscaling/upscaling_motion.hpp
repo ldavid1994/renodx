@@ -34,13 +34,14 @@ namespace batmanac::upscaling {
 
 // Forgets the batched motion: drawn, or dropped with a frame that never reached the upscaler.
 static void ResetMotionBatch() {
-  for (IUnknown* object : std::initializer_list<IUnknown*>{resolve_state.batch_view, resolve_state.batch_previous_view}) {
+  for (IUnknown* object : std::initializer_list<IUnknown*>{resolve_state.batch_view, resolve_state.batch_previous_view, resolve_state.tessellated_surface_depth_view}) {
     if (object != nullptr) {
       object->Release();
     }
   }
   resolve_state.batch_view = nullptr;
   resolve_state.batch_previous_view = nullptr;
+  resolve_state.tessellated_surface_depth_view = nullptr;
   for (const MotionBatch& batch : resolve_state.motion_batches) {
     batch.depth_view->Release();
     if (batch.rasterizer_state != nullptr) {
@@ -55,9 +56,10 @@ static void ResetMotionBatch() {
 }
 
 // Draws the frame's batched motion into the mask, motion and depth targets wherever a streamed-out triangle is the
-// depth's surface, then restores the game's state. Drawn last, a later draw in front of a moving one hides its motion.
+// depth's surface, marks the tessellated surfaces still in front, then restores the game's state. Drawn last, a later
+// draw in front of a moving one hides its motion.
 static void DrawBatchedMotion(ID3D11DeviceContext* context) {
-  if (resolve_state.motion_batches.empty()) return;
+  if (resolve_state.motion_batches.empty() && resolve_state.tessellated_surface_depth_view == nullptr) return;
   std::array<ID3D11RenderTargetView*, D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT> saved_render_targets = {};
   ID3D11DepthStencilView* saved_depth_view = nullptr;
   context->OMGetRenderTargets(static_cast<UINT>(saved_render_targets.size()), saved_render_targets.data(), &saved_depth_view);
@@ -91,10 +93,50 @@ static void DrawBatchedMotion(ID3D11DeviceContext* context) {
   context->GSGetShader(&saved_geometry_shader, nullptr, nullptr);
   ID3D11PixelShader* saved_pixel_shader = nullptr;
   context->PSGetShader(&saved_pixel_shader, nullptr, nullptr);
+  ID3D11ShaderResourceView* saved_pixel_resource = nullptr;
+  context->PSGetShaderResources(0u, 1u, &saved_pixel_resource);
   ID3D11Buffer* saved_constants_b1 = nullptr;
   context->VSGetConstantBuffers(1u, 1u, &saved_constants_b1);
   ID3D11Buffer* saved_constants_b11 = nullptr;
   context->VSGetConstantBuffers(11u, 1u, &saved_constants_b11);
+
+  const std::array<ID3D11RenderTargetView*, 3> character_targets = {resolve_state.character_mask_rtv, resolve_state.character_motion_rtv, resolve_state.character_depth_rtv};
+  // Binds the character targets with a read-only view of the given depth; false when none can be made.
+  auto bind_read_only_depth = [&](ID3D11DepthStencilView* depth_view) {
+    ID3D11Resource* depth_resource = nullptr;
+    depth_view->GetResource(&depth_resource);
+    D3D11_DEPTH_STENCIL_VIEW_DESC read_only_desc = {};
+    depth_view->GetDesc(&read_only_desc);
+    read_only_desc.Flags = D3D11_DSV_READ_ONLY_DEPTH;
+    if (read_only_desc.Format == DXGI_FORMAT_D24_UNORM_S8_UINT || read_only_desc.Format == DXGI_FORMAT_D32_FLOAT_S8X24_UINT) {
+      read_only_desc.Flags |= D3D11_DSV_READ_ONLY_STENCIL;
+    }
+    if (resolve_state.read_only_depth_view != nullptr) {
+      ID3D11Resource* kept_resource = nullptr;
+      resolve_state.read_only_depth_view->GetResource(&kept_resource);
+      D3D11_DEPTH_STENCIL_VIEW_DESC kept_desc = {};
+      resolve_state.read_only_depth_view->GetDesc(&kept_desc);
+      if (kept_resource != depth_resource || std::memcmp(&kept_desc, &read_only_desc, sizeof(kept_desc)) != 0) {
+        resolve_state.read_only_depth_view->Release();
+        resolve_state.read_only_depth_view = nullptr;
+      }
+      kept_resource->Release();
+    }
+    if (resolve_state.read_only_depth_view == nullptr) {
+      ID3D11Device* device = nullptr;
+      context->GetDevice(&device);
+      if (const HRESULT result = device->CreateDepthStencilView(depth_resource, &read_only_desc, &resolve_state.read_only_depth_view);
+          FAILED(result)) {
+        WarnOnce("cannot create a read-only depth view; moving objects drawn into that depth keep the camera's motion", result);
+      }
+      device->Release();
+    }
+    depth_resource->Release();
+    // Binding the game's writable view instead would unbind the depth wherever the game reads it as a texture.
+    if (resolve_state.read_only_depth_view == nullptr) return false;
+    context->OMSetRenderTargets(static_cast<UINT>(character_targets.size()), character_targets.data(), resolve_state.read_only_depth_view);
+    return true;
+  };
 
   context->OMSetDepthStencilState(resolve_state.character_mask_depth_state, 0u);
   context->OMSetBlendState(nullptr, nullptr, 0xFFFFFFFFu);
@@ -109,42 +151,10 @@ static void DrawBatchedMotion(ID3D11DeviceContext* context) {
   context->PSSetShader(resolve_state.motion_pixel_shader, nullptr, 0u);
   context->VSSetConstantBuffers(1u, 1u, &resolve_state.batch_view);
   context->VSSetConstantBuffers(11u, 1u, &resolve_state.batch_previous_view);
-  const std::array<ID3D11RenderTargetView*, 3> character_targets = {resolve_state.character_mask_rtv, resolve_state.character_motion_rtv, resolve_state.character_depth_rtv};
   ID3D11DepthStencilView* bound_depth_view = nullptr;
   for (const MotionBatch& batch : resolve_state.motion_batches) {
     if (batch.depth_view != bound_depth_view) {
-      ID3D11Resource* depth_resource = nullptr;
-      batch.depth_view->GetResource(&depth_resource);
-      D3D11_DEPTH_STENCIL_VIEW_DESC read_only_desc = {};
-      batch.depth_view->GetDesc(&read_only_desc);
-      read_only_desc.Flags = D3D11_DSV_READ_ONLY_DEPTH;
-      if (read_only_desc.Format == DXGI_FORMAT_D24_UNORM_S8_UINT || read_only_desc.Format == DXGI_FORMAT_D32_FLOAT_S8X24_UINT) {
-        read_only_desc.Flags |= D3D11_DSV_READ_ONLY_STENCIL;
-      }
-      if (resolve_state.read_only_depth_view != nullptr) {
-        ID3D11Resource* kept_resource = nullptr;
-        resolve_state.read_only_depth_view->GetResource(&kept_resource);
-        D3D11_DEPTH_STENCIL_VIEW_DESC kept_desc = {};
-        resolve_state.read_only_depth_view->GetDesc(&kept_desc);
-        if (kept_resource != depth_resource || std::memcmp(&kept_desc, &read_only_desc, sizeof(kept_desc)) != 0) {
-          resolve_state.read_only_depth_view->Release();
-          resolve_state.read_only_depth_view = nullptr;
-        }
-        kept_resource->Release();
-      }
-      if (resolve_state.read_only_depth_view == nullptr) {
-        ID3D11Device* device = nullptr;
-        context->GetDevice(&device);
-        if (const HRESULT result = device->CreateDepthStencilView(depth_resource, &read_only_desc, &resolve_state.read_only_depth_view);
-            FAILED(result)) {
-          WarnOnce("cannot create a read-only depth view; moving objects drawn into that depth keep the camera's motion", result);
-        }
-        device->Release();
-      }
-      depth_resource->Release();
-      // Binding the game's writable view instead would unbind the depth wherever the game reads it as a texture.
-      if (resolve_state.read_only_depth_view == nullptr) continue;
-      context->OMSetRenderTargets(static_cast<UINT>(character_targets.size()), character_targets.data(), resolve_state.read_only_depth_view);
+      if (!bind_read_only_depth(batch.depth_view)) continue;
       bound_depth_view = batch.depth_view;
     }
     context->RSSetState(batch.rasterizer_state);
@@ -155,6 +165,19 @@ static void DrawBatchedMotion(ID3D11DeviceContext* context) {
       // The vertex count is what this frame's stream-out wrote into the buffer in slot 0.
       context->DrawAuto();
     }
+  }
+  if (resolve_state.tessellated_surface_depth_view != nullptr && bind_read_only_depth(resolve_state.tessellated_surface_depth_view)) {
+    D3D11_TEXTURE2D_DESC surface_desc = {};
+    resolve_state.tessellated_surface_depth->GetDesc(&surface_desc);
+    const D3D11_VIEWPORT viewport = {.Width = static_cast<float>(surface_desc.Width), .Height = static_cast<float>(surface_desc.Height), .MaxDepth = 1.f};
+    context->OMSetDepthStencilState(resolve_state.tessellated_surface_test_state, 0u);
+    context->RSSetState(nullptr);
+    context->RSSetViewports(1u, &viewport);
+    context->IASetInputLayout(nullptr);
+    context->VSSetShader(resolve_state.composite_vertex_shader, nullptr, 0u);
+    context->PSSetShader(resolve_state.tessellated_mask_shader, nullptr, 0u);
+    context->PSSetShaderResources(0u, 1u, &resolve_state.tessellated_surface_srv);
+    context->Draw(3u, 0u);
   }
 
   context->OMSetRenderTargets(static_cast<UINT>(saved_render_targets.size()), saved_render_targets.data(), saved_depth_view);
@@ -170,11 +193,13 @@ static void DrawBatchedMotion(ID3D11DeviceContext* context) {
   context->DSSetShader(saved_domain_shader, nullptr, 0u);
   context->GSSetShader(saved_geometry_shader, nullptr, 0u);
   context->PSSetShader(saved_pixel_shader, nullptr, 0u);
+  context->PSSetShaderResources(0u, 1u, &saved_pixel_resource);
   context->VSSetConstantBuffers(1u, 1u, &saved_constants_b1);
   context->VSSetConstantBuffers(11u, 1u, &saved_constants_b11);
   for (IUnknown* saved : std::initializer_list<IUnknown*>{saved_depth_view, saved_depth_state, saved_blend_state, saved_rasterizer_state, saved_input_layout,
                                                           saved_vertex_buffers[0], saved_vertex_buffers[1], saved_vertex_shader, saved_hull_shader,
-                                                          saved_domain_shader, saved_geometry_shader, saved_pixel_shader, saved_constants_b1, saved_constants_b11}) {
+                                                          saved_domain_shader, saved_geometry_shader, saved_pixel_shader, saved_pixel_resource,
+                                                          saved_constants_b1, saved_constants_b11}) {
     if (saved != nullptr) {
       saved->Release();
     }
@@ -219,6 +244,10 @@ static void ReleaseCharacterTargets() {
   release(&resolve_state.tessellated_depth_state);
   release(&resolve_state.motion_world_vertex_shader);
   release(&resolve_state.tessellated_mask_shader);
+  release(&resolve_state.tessellated_surface_test_state);
+  release(&resolve_state.tessellated_surface_srv);
+  release(&resolve_state.tessellated_surface_dsv);
+  release(&resolve_state.tessellated_surface_depth);
   release(&resolve_state.read_only_depth_view);
   release(&resolve_state.view_copies[0]);
   release(&resolve_state.view_copies[1]);
@@ -392,11 +421,17 @@ static bool MarkCharacter(reshade::api::command_list* cmd_list, const std::array
     const D3D11_DEPTH_STENCIL_VIEW_DESC tessellated_dsv_desc = {.Format = DXGI_FORMAT_D32_FLOAT, .ViewDimension = D3D11_DSV_DIMENSION_TEXTURE2D};
     const D3D11_SHADER_RESOURCE_VIEW_DESC tessellated_srv_desc = {
         .Format = DXGI_FORMAT_R32_FLOAT, .ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D, .Texture2D = {.MipLevels = 1u}};
-    // The game's depth buffer is inverted: nearer is greater.
+    // Nearer is smaller in the game's depth buffer (the scene alpha holds 1 - depth): the nearest triangle wins.
     const D3D11_DEPTH_STENCIL_DESC tessellated_depth_state_desc = {
         .DepthEnable = TRUE,
         .DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ALL,
-        .DepthFunc = D3D11_COMPARISON_GREATER,
+        .DepthFunc = D3D11_COMPARISON_LESS,
+    };
+    // The surface's depth (output a little nearer) against the final depth: passes where nothing nearer covers it.
+    const D3D11_DEPTH_STENCIL_DESC tessellated_surface_test_desc = {
+        .DepthEnable = TRUE,
+        .DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ZERO,
+        .DepthFunc = D3D11_COMPARISON_LESS_EQUAL,
     };
     const std::array<D3D11_INPUT_ELEMENT_DESC, 2> motion_input_elements = {{
         {.SemanticName = "CURRENT", .Format = DXGI_FORMAT_R32G32B32A32_FLOAT, .InputSlot = 0u, .InputSlotClass = D3D11_INPUT_PER_VERTEX_DATA},
@@ -425,7 +460,13 @@ static bool MarkCharacter(reshade::api::command_list* cmd_list, const std::array
                          && SUCCEEDED(device->CreateShaderResourceView(resolve_state.tessellated_depth, &tessellated_srv_desc, &resolve_state.tessellated_depth_srv))
                          && SUCCEEDED(device->CreateDepthStencilState(&tessellated_depth_state_desc, &resolve_state.tessellated_depth_state))
                          && SUCCEEDED(device->CreateVertexShader(__upscaling_motion_world_vertex.data(), __upscaling_motion_world_vertex.size(), nullptr, &resolve_state.motion_world_vertex_shader))
-                         && SUCCEEDED(device->CreatePixelShader(__upscaling_tessellated_mask.data(), __upscaling_tessellated_mask.size(), nullptr, &resolve_state.tessellated_mask_shader));
+                         && SUCCEEDED(device->CreatePixelShader(__upscaling_tessellated_mask.data(), __upscaling_tessellated_mask.size(), nullptr, &resolve_state.tessellated_mask_shader))
+                         && SUCCEEDED(device->CreateTexture2D(&tessellated_depth_desc, nullptr, &resolve_state.tessellated_surface_depth))
+                         && SUCCEEDED(device->CreateDepthStencilView(resolve_state.tessellated_surface_depth, &tessellated_dsv_desc, &resolve_state.tessellated_surface_dsv))
+                         && SUCCEEDED(device->CreateShaderResourceView(resolve_state.tessellated_surface_depth, &tessellated_srv_desc, &resolve_state.tessellated_surface_srv))
+                         && SUCCEEDED(device->CreateDepthStencilState(&tessellated_surface_test_desc, &resolve_state.tessellated_surface_test_state))
+                         && (resolve_state.composite_vertex_shader != nullptr
+                             || SUCCEEDED(device->CreateVertexShader(__upscaling_composite_vertex.data(), __upscaling_composite_vertex.size(), nullptr, &resolve_state.composite_vertex_shader)));
     device->Release();
     if (!created) {
       ReleaseCharacterTargets();
@@ -439,7 +480,8 @@ static bool MarkCharacter(reshade::api::command_list* cmd_list, const std::array
     constexpr std::array<float, 4> MOTION_CLEAR_COLOR = {CHARACTER_MOTION_UNKNOWN, CHARACTER_MOTION_UNKNOWN, 0.f, 0.f};
     context->ClearRenderTargetView(resolve_state.character_motion_rtv, MOTION_CLEAR_COLOR.data());
     context->ClearRenderTargetView(resolve_state.tessellated_motion_rtv, MOTION_CLEAR_COLOR.data());
-    context->ClearDepthStencilView(resolve_state.tessellated_depth_dsv, D3D11_CLEAR_DEPTH, 0.f, 0u);
+    context->ClearDepthStencilView(resolve_state.tessellated_depth_dsv, D3D11_CLEAR_DEPTH, 1.f, 0u);
+    context->ClearDepthStencilView(resolve_state.tessellated_surface_dsv, D3D11_CLEAR_DEPTH, 1.f, 0u);
   }
 
   issue_draw();
@@ -749,7 +791,8 @@ static bool MarkCharacter(reshade::api::command_list* cmd_list, const std::array
     }
   }
 
-  // Batched draws with motion are done; the others draw their mask (and a tessellated draw its motion) here.
+  // Batched draws with motion are done; a tessellated draw with motion draws its motion and depth here, the others their
+  // mask.
   if (has_motion && !tessellated) {
     for (IUnknown* saved : std::initializer_list<IUnknown*>{hull_shader, domain_shader, current_domain_view}) {
       if (saved != nullptr) {
@@ -770,9 +813,20 @@ static bool MarkCharacter(reshade::api::command_list* cmd_list, const std::array
   context->PSGetShader(&saved_pixel_shader, nullptr, nullptr);
   context->OMSetBlendState(nullptr, nullptr, 0xFFFFFFFFu);
   const std::array<ID3D11RenderTargetView*, 3> character_targets = {resolve_state.character_mask_rtv, resolve_state.character_motion_rtv, resolve_state.character_depth_rtv};
-  if (has_motion) {
+  // The end-of-frame test reads one depth, and the scratch depth has no stencil to repeat a stencil test that can reject
+  // pixels: a draw into another depth or with such a test gets the draw-time mask, without its motion.
+  bool stencil_rejects = false;
+  if (saved_depth_state != nullptr) {
+    D3D11_DEPTH_STENCIL_DESC game_depth_desc = {};
+    saved_depth_state->GetDesc(&game_depth_desc);
+    stencil_rejects = game_depth_desc.StencilEnable != FALSE
+                      && (game_depth_desc.FrontFace.StencilFunc != D3D11_COMPARISON_ALWAYS || game_depth_desc.BackFace.StencilFunc != D3D11_COMPARISON_ALWAYS);
+  }
+  const bool marks_surface = tessellated && has_motion && !stencil_rejects
+                             && (resolve_state.tessellated_surface_depth_view == nullptr || resolve_state.tessellated_surface_depth_view == depth_view);
+  if (marks_surface) {
     // The untessellated triangles miss the tessellated surface's depth: their motion goes to its own target, nearest
-    // triangle first, and the real surface is marked below.
+    // triangle first, and the real surface's depth is drawn below.
     const std::array<ID3D11RenderTargetView*, 3> tessellated_targets = {nullptr, resolve_state.tessellated_motion_rtv, nullptr};
     context->OMSetRenderTargets(static_cast<UINT>(tessellated_targets.size()), tessellated_targets.data(), resolve_state.tessellated_depth_dsv);
     context->OMSetDepthStencilState(resolve_state.tessellated_depth_state, 0u);
@@ -822,11 +876,23 @@ static bool MarkCharacter(reshade::api::command_list* cmd_list, const std::array
     }
     ++resolve_state.motion_draws;
   }
-  context->OMSetRenderTargets(static_cast<UINT>(character_targets.size()), character_targets.data(), depth_view);
-  context->OMSetDepthStencilState(resolve_state.character_mask_depth_state, 0u);
-  context->PSSetShader((has_motion ? resolve_state.tessellated_mask_shader : resolve_state.character_mask_shader), nullptr, 0u);
-  issue_draw();
-  if (!has_motion) {
+  if (marks_surface) {
+    // The surface's own depth, marked at the end of the frame where it is still in front. The game's pixel shader and
+    // blend state stay bound so pixels it discards are left out, as in the game's depth.
+    context->OMSetRenderTargets(0u, nullptr, resolve_state.tessellated_surface_dsv);
+    context->OMSetDepthStencilState(resolve_state.tessellated_depth_state, 0u);
+    context->OMSetBlendState(saved_blend_state, saved_blend_factor.data(), saved_sample_mask);
+    context->PSSetShader(saved_pixel_shader, nullptr, 0u);
+    issue_draw();
+    if (resolve_state.tessellated_surface_depth_view == nullptr) {
+      resolve_state.tessellated_surface_depth_view = depth_view;
+      depth_view->AddRef();
+    }
+  } else {
+    context->OMSetRenderTargets(static_cast<UINT>(character_targets.size()), character_targets.data(), depth_view);
+    context->OMSetDepthStencilState(resolve_state.character_mask_depth_state, 0u);
+    context->PSSetShader(resolve_state.character_mask_shader, nullptr, 0u);
+    issue_draw();
     ++resolve_state.motion_fallbacks;
   }
 

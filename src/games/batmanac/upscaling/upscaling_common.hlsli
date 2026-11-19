@@ -2,7 +2,7 @@
 
 #include "../shared.h"
 
-// rgb: jittered scene color, a: device depth of the inverted depth buffer, 1 - z of the CPU projection matrix.
+// rgb: jittered scene color, a: 1 - device depth (the CPU projection's z), where the scene stores depth.
 Texture2D<float4> scene_texture : register(t0);
 
 cbuffer upscaling_constants : register(b0) {

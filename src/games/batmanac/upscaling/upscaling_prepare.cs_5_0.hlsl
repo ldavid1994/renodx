@@ -11,7 +11,7 @@ Texture2D<float2> character_motion_texture : register(t2);
 // Device depth of skinned draws with motion, 0 elsewhere: their materials write other data into the scene alpha.
 Texture2D<float> character_depth_texture : register(t3);
 // Tessellated skinned draws: previous minus current NDC of their untessellated triangles (nearest first), then the
-// device depth of those triangles (0 where none).
+// device depth of those triangles (1 where none).
 Texture2D<float2> tessellated_motion_texture : register(t4);
 Texture2D<float> tessellated_depth_texture : register(t5);
 RWTexture2D<float> depth_output : register(u0);
@@ -65,6 +65,10 @@ void main(uint3 dispatch_thread_id: SV_DispatchThreadID) {
           break;
         }
       }
+    }
+    // No triangle within reach: the scratch depth is still the cleared 1, so the scene alpha stays the depth.
+    if (character_depth == 1.f) {
+      character_depth = 0.f;
     }
   }
 
