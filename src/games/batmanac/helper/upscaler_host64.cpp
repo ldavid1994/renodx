@@ -68,8 +68,9 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE previous_instance, PWSTR comma
   constexpr std::wstring_view SIGNAL_COMMAND = L"signal ";
   // "signal <game process id> <generation> <awaited value> <adapter LUID low> <adapter LUID high>": started by the add-on
   // when the host stopped after a request. Opens the shared fence by name on a D3D12 device, which can signal from the CPU
-  // (a D3D11 device cannot), and answers each request of the game's the fence reaches (odd values) until it passes the
-  // awaited value. Never signalling ahead of the game's own request signal keeps the fence from being rewound by it.
+  // (a D3D11 device cannot). Each odd value is a request the game signaled; it is answered with the next even value until
+  // the fence reaches the awaited value. Answering only requests that already landed keeps the game's later signals from
+  // moving the fence backwards.
   if (std::wstring_view(command_line).starts_with(SIGNAL_COMMAND)) {
     log_file.open(host_folder / L"renodx-batmanac-dlaa-host64.log", std::ios::app);
     wchar_t* next = nullptr;

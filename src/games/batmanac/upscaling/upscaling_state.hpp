@@ -290,7 +290,7 @@ inline constexpr const char* AA_SETTING_KEY = "DLAA";
 // method is then FSR and the choice is hidden.
 static bool dlss_available = true;
 // True while the upscaler resolved in the last two frames. The camera jitter and the texture LOD bias only help then; while it
-// starts, after a failure or with MSAA on they would shake and sharpen the game's own image.
+// starts, after a failure or with MSAA on, the unresolved jitter would shake the image and the bias would oversharpen it.
 static std::atomic<bool> aa_resolving = false;
 // NVSDK_NGX_DLSS_Hint_Render_Preset value: 0 default, 10 J, 11 K, 12 L, 13 M. K keeps thin geometry steady but averages
 // away falling snow and animated lights; L keeps those and shimmers on railings and grates.
