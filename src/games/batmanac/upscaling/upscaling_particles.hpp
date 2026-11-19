@@ -17,10 +17,10 @@
 #include <include/reshade.hpp>
 
 #include "../../../utils/state.hpp"
-#include "./dlaa_state.hpp"
+#include "./upscaling_state.hpp"
 
-// Snow, rain and the main menu's dirt overlay: draws held back from before DLAA and replayed after it.
-namespace batmanac::dlaa {
+// Snow, rain and the main menu's dirt overlay: draws held back from before the upscaler and replayed after it.
+namespace batmanac::upscaling {
 
 constexpr UINT RECORDED_VERTEX_BUFFER_SLOTS = 4u;
 constexpr UINT RECORDED_RESOURCE_SLOTS = 32u;
@@ -68,11 +68,11 @@ struct RecordedDraw {
   UINT first_instance = 0u;
 };
 
-// Particle draws held back until DLAA's output is over the scene. Render thread only.
+// Particle draws held back until the upscaler's output is over the scene. Render thread only.
 struct ParticleRecorder {
   std::vector<RecordedDraw> draws;
   std::size_t count = 0u;
-  // The particles drew into the scene target, but the first post pass reads a copy of it, which DLAA writes: the
+  // The particles drew into the scene target, but the first post pass reads a copy of it, which the upscaler writes: the
   // replay draws into that copy.
   ID3D11RenderTargetView* post_input_rtv = nullptr;
   ID3D11Resource* post_input = nullptr;
@@ -152,13 +152,13 @@ static void ClearRecordedDraws(bool release_copies) {
 // and rain mesh, the distant rain curtain and the main menu's scrolling dirt overlay.
 constexpr std::array<std::uint32_t, 3> REPLAYED_PIXEL_SHADERS = {0x19F9FBC2u, 0x03DE17F0u, 0x71D465C2u};
 
-// One of those draws (blending on, no depth writes) into the main scene target before the DLAA pass is held back and
-// replayed over DLAA's output.
-// Only while the previous frame resolved, so the replay can expect this frame's DLAA output. True when the draw was
+// One of those draws (blending on, no depth writes) into the main scene target before the upscaler pass is held back and
+// replayed over the upscaler's output.
+// Only while the previous frame resolved, so the replay can expect this frame's upscaler output. True when the draw was
 // recorded, so the original is skipped.
 static bool RecordParticleDraw(reshade::api::command_list* cmd_list, bool indexed, UINT count, UINT instance_count, UINT first,
                                INT base_vertex, UINT first_instance) {
-  if (dlaa_enabled == 0.f || !particle_replay || resolve_state.last_resolve_frame == UINT64_MAX
+  if (aa_enabled == 0.f || !particle_replay || resolve_state.last_resolve_frame == UINT64_MAX
       || resolve_state.last_resolve_frame + 1u != resolve_state.frame_index) return false;
   // In the pause menu the filter is built from the scene before the replay: draws replayed later would sit on top.
   if (resolve_state.last_pause_filter_frame != UINT64_MAX && resolve_state.last_pause_filter_frame + 1u >= resolve_state.frame_index) return false;
@@ -239,7 +239,7 @@ static bool RecordParticleDraw(reshade::api::command_list* cmd_list, bool indexe
       }
       const D3D11_BUFFER_DESC desc = {.ByteWidth = (size + 15u) & ~15u, .Usage = D3D11_USAGE_DEFAULT, .BindFlags = bind_flags};
       if (const HRESULT result = device->CreateBuffer(&desc, nullptr, copy); FAILED(result)) {
-        WarnOnce("cannot copy a held-back particle draw's buffers; it is drawn in place, before DLAA", result);
+        WarnOnce("cannot copy a held-back particle draw's buffers; it is drawn in place, before the upscaler", result);
         return nullptr;
       }
     }
@@ -327,4 +327,4 @@ static bool RecordParticleDraw(reshade::api::command_list* cmd_list, bool indexe
   return true;
 }
 
-}  // namespace batmanac::dlaa
+}  // namespace batmanac::upscaling

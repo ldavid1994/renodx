@@ -6,6 +6,7 @@
 #pragma once
 
 #include <d3d11.h>
+#include <dxgi.h>
 #include <Windows.h>
 
 #include <algorithm>
@@ -15,11 +16,14 @@
 #include <cstddef>
 #include <cstdint>
 #include <exception>
+#include <filesystem>
 #include <format>
 #include <initializer_list>
 #include <mutex>
 #include <shared_mutex>
 #include <span>
+#include <string>
+#include <system_error>
 #include <unordered_map>
 #include <utility>
 
@@ -28,23 +32,24 @@
 
 #include "../../../utils/detour.hpp"
 #include "../../../utils/hash.hpp"
+#include "../../../utils/settings.hpp"
 #include "../../../utils/state.hpp"
-#include "./dlaa_host.hpp"
-#include "./dlaa_motion.hpp"
-#include "./dlaa_particles.hpp"
-#include "./dlaa_state.hpp"
+#include "./host_link.hpp"
+#include "./upscaling_motion.hpp"
+#include "./upscaling_particles.hpp"
+#include "./upscaling_state.hpp"
 #include "../shared.h"
 
-// NVIDIA DLAA for a game without temporal AA. The player view's projection matrix is jittered where
+// Temporal anti-aliasing (NVIDIA DLAA or AMD FSR at native resolution) for a game without it. The player view's projection matrix is jittered where
 // ULocalPlayer::CalcSceneView hands it to the FSceneView constructor: every matrix the renderer derives from it
 // (view-projection, its inverse, screen to shadow) stays consistent. Before the first post pass, which reads the scene
-// with 1 - device depth in alpha, compute passes write DLSS's inputs, the 64-bit host runs DLAA and its output replaces
+// with 1 - device depth in alpha, compute passes write DLSS's inputs, the 64-bit host runs the upscaler and its output replaces
 // the scene.
-namespace batmanac::dlaa {
+namespace batmanac::upscaling {
 
 static void* scene_view_trampoline = nullptr;
-// The game's device: the first one created while none is tracked. Other devices leave DLAA alone.
-static reshade::api::device* dlaa_device = nullptr;
+// The game's device: the first one created while none is tracked. Other devices leave the upscaler alone.
+static reshade::api::device* game_device = nullptr;
 
 static void __cdecl OnCalcSceneView(Matrix4* view_matrix, Matrix4* projection_matrix) {
   const std::unique_lock lock(view_queue.mutex);
@@ -53,7 +58,7 @@ static void __cdecl OnCalcSceneView(Matrix4* view_matrix, Matrix4* projection_ma
     view_queue.pending_views.pop_front();
   }
 
-  if (dlaa_enabled == 0.f || !dlaa_resolving.load() || view_queue.render_width == 0.f || view_queue.render_height == 0.f) return;
+  if (aa_enabled == 0.f || !aa_resolving.load() || view_queue.render_width == 0.f || view_queue.render_height == 0.f) return;
 
   auto halton = [](std::uint32_t index, std::uint32_t base) {
     float fraction = 1.f;
@@ -116,7 +121,7 @@ static void DestroyOutputs(reshade::api::device* device) {
   resolve_state.height = 0u;
 }
 
-constexpr UINT DLAA_SHADER_RESOURCES = 6u;
+constexpr UINT UPSCALING_SHADER_RESOURCES = 6u;
 
 // scene_srv: a view of the scene, or null when the scene is the bound render target (it is then unbound and read through
 // a cached view).
@@ -124,11 +129,11 @@ static bool Resolve(reshade::api::command_list* cmd_list, reshade::api::resource
   DrawBatchedMotion(reinterpret_cast<ID3D11DeviceContext*>(cmd_list->get_native()));
   auto* device = cmd_list->get_device();
   const reshade::api::resource_desc scene_desc = device->get_resource_desc(scene);
-  // With MSAA on, the full-screen scene and the main depth are multisampled: DLAA would only run later on the game's
+  // With MSAA on, the full-screen scene and the main depth are multisampled: the upscaler would only run later on the game's
   // resolved copy, without the characters' own motion, on top of MSAA's cost. It turns itself off instead.
   if (scene_desc.texture.samples != 1u && static_cast<float>(scene_desc.texture.width) == view_queue.render_width
       && static_cast<float>(scene_desc.texture.height) == view_queue.render_height) {
-    FailDlaa("the scene is multisampled; turn MSAA off in the game's launcher to use DLAA");
+    TurnOffAntiAliasing("the scene is multisampled; turn MSAA off in the game's launcher to use anti-aliasing");
     return false;
   }
   if (scene_desc.texture.samples != 1u || scene_desc.texture.format != reshade::api::format::r16g16b16a16_float) {
@@ -162,11 +167,11 @@ static bool Resolve(reshade::api::command_list* cmd_list, reshade::api::resource
   if (resolve_state.layout.handle == 0u) {
     const std::array<reshade::api::pipeline_layout_param, 4> params = {
         reshade::api::pipeline_layout_param(reshade::api::descriptor_range{
-            .dx_register_index = 0u, .count = DLAA_SHADER_RESOURCES, .visibility = reshade::api::shader_stage::compute, .type = reshade::api::descriptor_type::shader_resource_view}),
+            .dx_register_index = 0u, .count = UPSCALING_SHADER_RESOURCES, .visibility = reshade::api::shader_stage::compute, .type = reshade::api::descriptor_type::shader_resource_view}),
         reshade::api::pipeline_layout_param(reshade::api::descriptor_range{
             .dx_register_index = 0u, .count = 5u, .visibility = reshade::api::shader_stage::compute, .type = reshade::api::descriptor_type::unordered_access_view}),
         reshade::api::pipeline_layout_param(reshade::api::constant_range{
-            .dx_register_index = 0u, .count = sizeof(DlaaConstants) / sizeof(std::uint32_t), .visibility = reshade::api::shader_stage::compute}),
+            .dx_register_index = 0u, .count = sizeof(UpscalingConstants) / sizeof(std::uint32_t), .visibility = reshade::api::shader_stage::compute}),
         reshade::api::pipeline_layout_param(reshade::api::constant_range{
             .dx_register_index = 13u, .count = sizeof(ShaderInjectData) / sizeof(std::uint32_t), .visibility = reshade::api::shader_stage::compute}),
     };
@@ -177,9 +182,9 @@ static bool Resolve(reshade::api::command_list* cmd_list, reshade::api::resource
       return device->create_pipeline(resolve_state.layout, 1u, &subobject, pipeline);
     };
     if (!device->create_pipeline_layout(static_cast<std::uint32_t>(params.size()), params.data(), &resolve_state.layout)
-        || !create_compute_pipeline(__dlaa_prepare, &resolve_state.prepare_pipeline)
-        || !create_compute_pipeline(__dlaa_composite, &resolve_state.composite_pipeline)) {
-      FailDlaa("cannot create the compute pipelines");
+        || !create_compute_pipeline(__upscaling_prepare, &resolve_state.prepare_pipeline)
+        || !create_compute_pipeline(__upscaling_composite, &resolve_state.composite_pipeline)) {
+      TurnOffAntiAliasing("cannot create the compute pipelines");
       return false;
     }
   }
@@ -199,7 +204,7 @@ static bool Resolve(reshade::api::command_list* cmd_list, reshade::api::resource
           || !device->create_resource_view(item.resource, reshade::api::resource_usage::unordered_access,
                                            reshade::api::resource_view_desc(scene_desc.texture.format), &item.uav)) {
         DestroyOutputs(device);
-        FailDlaa("cannot create the output textures");
+        TurnOffAntiAliasing("cannot create the output textures");
         return false;
       }
     }
@@ -279,7 +284,7 @@ static bool Resolve(reshade::api::command_list* cmd_list, reshade::api::resource
     history_valid = false;
   }
 
-  DlaaConstants constants = {
+  UpscalingConstants constants = {
       .projection_terms = projection_terms,
       // The mask exists once a skinned draw was marked; it is cleared after every present.
       .character_mask_valid = (resolve_state.character_mask_srv != nullptr ? 1.f : 0.f),
@@ -290,7 +295,7 @@ static bool Resolve(reshade::api::command_list* cmd_list, reshade::api::resource
 
   auto* context = reinterpret_cast<ID3D11DeviceContext*>(cmd_list->get_native());
   // Without a view of the game's, the scene is the bound render target: the input pass reads it through a view of its own
-  // while it is unbound, and DLAA's output is drawn back over it.
+  // while it is unbound, and the upscaler's output is drawn back over it.
   const bool scene_is_target = (scene_srv.handle == 0u);
   if (scene_is_target) {
     auto* scene_resource = reinterpret_cast<ID3D11Resource*>(scene.handle);
@@ -310,9 +315,9 @@ static bool Resolve(reshade::api::command_list* cmd_list, reshade::api::resource
       blend_desc.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_RED | D3D11_COLOR_WRITE_ENABLE_GREEN | D3D11_COLOR_WRITE_ENABLE_BLUE;
       const bool created = (scene_view != nullptr || SUCCEEDED(native_device->CreateShaderResourceView(scene_resource, &scene_view_desc, &scene_view)))
                            && (resolve_state.composite_vertex_shader != nullptr
-                               || SUCCEEDED(native_device->CreateVertexShader(__dlaa_composite_vertex.data(), __dlaa_composite_vertex.size(), nullptr, &resolve_state.composite_vertex_shader)))
+                               || SUCCEEDED(native_device->CreateVertexShader(__upscaling_composite_vertex.data(), __upscaling_composite_vertex.size(), nullptr, &resolve_state.composite_vertex_shader)))
                            && (resolve_state.composite_pixel_shader != nullptr
-                               || SUCCEEDED(native_device->CreatePixelShader(__dlaa_composite_pixel.data(), __dlaa_composite_pixel.size(), nullptr, &resolve_state.composite_pixel_shader)))
+                               || SUCCEEDED(native_device->CreatePixelShader(__upscaling_composite_pixel.data(), __upscaling_composite_pixel.size(), nullptr, &resolve_state.composite_pixel_shader)))
                            && (resolve_state.composite_blend_state != nullptr || SUCCEEDED(native_device->CreateBlendState(&blend_desc, &resolve_state.composite_blend_state)));
       native_device->Release();
       if (!created) {
@@ -320,18 +325,18 @@ static bool Resolve(reshade::api::command_list* cmd_list, reshade::api::resource
           scene_view->Release();
         }
         resolve_state.scene_views.erase(scene_resource);
-        FailDlaa("cannot create the composite draw");
+        TurnOffAntiAliasing("cannot create the composite draw");
         return false;
       }
     }
     scene_srv = reshade::api::resource_view{reinterpret_cast<std::uintptr_t>(scene_view)};
   }
-  if (!StartDlaa(context, scene_desc.texture.width, scene_desc.texture.height)) return false;
+  if (!StartHost(context, scene_desc.texture.width, scene_desc.texture.height)) return false;
 
   // The dispatches run inside the game's draw: save the compute bindings they overwrite and put them back.
   ID3D11ComputeShader* saved_shader = nullptr;
   context->CSGetShader(&saved_shader, nullptr, nullptr);
-  std::array<ID3D11ShaderResourceView*, DLAA_SHADER_RESOURCES> saved_srvs = {};
+  std::array<ID3D11ShaderResourceView*, UPSCALING_SHADER_RESOURCES> saved_srvs = {};
   context->CSGetShaderResources(0u, static_cast<UINT>(saved_srvs.size()), saved_srvs.data());
   std::array<ID3D11UnorderedAccessView*, 5> saved_uavs = {};
   context->CSGetUnorderedAccessViews(0u, static_cast<UINT>(saved_uavs.size()), saved_uavs.data());
@@ -343,20 +348,20 @@ static bool Resolve(reshade::api::command_list* cmd_list, reshade::api::resource
   const ComputeTarget& composite_output = resolve_state.outputs[0];
   const ComputeTarget& debug_output = resolve_state.outputs[1];
   auto native_view = [](IUnknown* view) { return reshade::api::resource_view{reinterpret_cast<std::uintptr_t>(view)}; };
-  auto dispatch = [&](reshade::api::pipeline pipeline, const std::array<reshade::api::resource_view, DLAA_SHADER_RESOURCES>& shader_resources,
+  auto dispatch = [&](reshade::api::pipeline pipeline, const std::array<reshade::api::resource_view, UPSCALING_SHADER_RESOURCES>& shader_resources,
                       const std::array<reshade::api::resource_view, 5>& unordered_accesses) {
     cmd_list->bind_pipeline(reshade::api::pipeline_stage::all_compute, pipeline);
     cmd_list->push_descriptors(reshade::api::shader_stage::compute, resolve_state.layout, 0u,
-                               {.count = DLAA_SHADER_RESOURCES, .type = reshade::api::descriptor_type::shader_resource_view, .descriptors = shader_resources.data()});
+                               {.count = UPSCALING_SHADER_RESOURCES, .type = reshade::api::descriptor_type::shader_resource_view, .descriptors = shader_resources.data()});
     cmd_list->push_descriptors(reshade::api::shader_stage::compute, resolve_state.layout, 1u,
                                {.count = 5u, .type = reshade::api::descriptor_type::unordered_access_view, .descriptors = unordered_accesses.data()});
     cmd_list->push_constants(reshade::api::shader_stage::compute, resolve_state.layout, 2u, 0u,
-                             sizeof(DlaaConstants) / sizeof(std::uint32_t), &constants);
+                             sizeof(UpscalingConstants) / sizeof(std::uint32_t), &constants);
     cmd_list->push_constants(reshade::api::shader_stage::compute, resolve_state.layout, 3u, 0u,
                              sizeof(ShaderInjectData) / sizeof(std::uint32_t), shader_injection);
     cmd_list->dispatch((resolve_state.width + 7u) / 8u, (resolve_state.height + 7u) / 8u, 1u);
     // The host reads and writes the shared textures: they must not stay bound here.
-    const std::array<ID3D11ShaderResourceView*, DLAA_SHADER_RESOURCES> no_shader_resources = {};
+    const std::array<ID3D11ShaderResourceView*, UPSCALING_SHADER_RESOURCES> no_shader_resources = {};
     const std::array<ID3D11UnorderedAccessView*, 5> no_unordered_accesses = {};
     context->CSSetShaderResources(0u, static_cast<UINT>(no_shader_resources.size()), no_shader_resources.data());
     context->CSSetUnorderedAccessViews(0u, static_cast<UINT>(no_unordered_accesses.size()), no_unordered_accesses.data(), nullptr);
@@ -375,16 +380,16 @@ static bool Resolve(reshade::api::command_list* cmd_list, reshade::api::resource
     context->OMGetRenderTargets(static_cast<UINT>(saved_render_targets.size()), saved_render_targets.data(), &saved_depth_view);
     context->OMSetRenderTargets(0u, nullptr, nullptr);
   }
-  const bool resolved = RunDlaa(current_view.jitter_pixels, history_valid, [&]() {
+  const bool resolved = RunUpscaler(current_view, history_valid, [&]() {
     dispatch(resolve_state.prepare_pipeline,
              {scene_srv, native_view(resolve_state.character_mask_srv), native_view(resolve_state.character_motion_srv),
               native_view(resolve_state.character_depth_srv), native_view(resolve_state.tessellated_motion_srv),
               native_view(resolve_state.tessellated_depth_srv)},
-             {native_view(dlaa_state.depth_uav), native_view(dlaa_state.motion_vector_uav), native_view(dlaa_state.bias_mask_uav),
-              native_view(dlaa_state.color_uav), debug_output.uav}); }, [&]() {
+             {native_view(host_link.depth_uav), native_view(host_link.motion_vector_uav), native_view(host_link.bias_mask_uav),
+              native_view(host_link.color_uav), debug_output.uav}); }, [&]() {
     if (!scene_is_target) {
       dispatch(resolve_state.composite_pipeline,
-               {scene_srv, native_view(dlaa_state.output_srv), reshade::api::resource_view{0}, reshade::api::resource_view{0}, reshade::api::resource_view{0},
+               {scene_srv, native_view(host_link.output_srv), reshade::api::resource_view{0}, reshade::api::resource_view{0}, reshade::api::resource_view{0},
                 reshade::api::resource_view{0}},
                {composite_output.uav, reshade::api::resource_view{0}, reshade::api::resource_view{0}, reshade::api::resource_view{0}, reshade::api::resource_view{0}});
       return;
@@ -427,7 +432,7 @@ static bool Resolve(reshade::api::command_list* cmd_list, reshade::api::resource
     context->DSSetShader(nullptr, nullptr, 0u);
     context->GSSetShader(nullptr, nullptr, 0u);
     context->PSSetShader(resolve_state.composite_pixel_shader, nullptr, 0u);
-    context->PSSetShaderResources(0u, 1u, &dlaa_state.output_srv);
+    context->PSSetShaderResources(0u, 1u, &host_link.output_srv);
     context->Draw(3u, 0u);
 
     context->PSSetShaderResources(0u, 1u, &saved_pixel_resource);
@@ -492,7 +497,7 @@ static bool Resolve(reshade::api::command_list* cmd_list, reshade::api::resource
 
 template <typename IssueDraw>
 static bool OnDrawCall(reshade::api::command_list* cmd_list, const IssueDraw& issue_draw) {
-  if (dlaa_enabled == 0.f && particle_recorder.count == 0u) return false;
+  if (aa_enabled == 0.f && particle_recorder.count == 0u) return false;
   const std::uint32_t pixel_shader = renodx::utils::state::GetCurrentShaderHash(cmd_list, reshade::api::pipeline_stage::pixel_shader);
   if (pixel_shader == PAUSE_FILTER_PS) {
     resolve_state.last_pause_filter_frame = resolve_state.frame_index;
@@ -500,7 +505,7 @@ static bool OnDrawCall(reshade::api::command_list* cmd_list, const IssueDraw& is
   }
   auto* context = reinterpret_cast<ID3D11DeviceContext*>(cmd_list->get_native());
   if (renodx::utils::state::GetCurrentShaderHash(cmd_list, reshade::api::pipeline_stage::vertex_shader) == SCENE_FOG_VS) {
-    if (dlaa_enabled == 0.f || resolve_state.last_attempt_frame == resolve_state.frame_index) return false;
+    if (aa_enabled == 0.f || resolve_state.last_attempt_frame == resolve_state.frame_index) return false;
     ID3D11RenderTargetView* scene_rtv = nullptr;
     context->OMGetRenderTargets(1u, &scene_rtv, nullptr);
     if (scene_rtv == nullptr) return false;
@@ -516,7 +521,7 @@ static bool OnDrawCall(reshade::api::command_list* cmd_list, const IssueDraw& is
     return true;
   }
   if (pixel_shader != SCENE_DEPTH_TO_VIEW_DISTANCE_PS) return false;
-  if (dlaa_enabled != 0.f) {
+  if (aa_enabled != 0.f) {
     ++resolve_state.pass_draws;
     if (resolve_state.last_attempt_frame != resolve_state.frame_index) {
       if (const reshade::api::resource_view scene_srv = renodx::utils::state::GetBoundResourceView(
@@ -529,7 +534,7 @@ static bool OnDrawCall(reshade::api::command_list* cmd_list, const IssueDraw& is
   if (particle_recorder.count == 0u) return false;
 
   // Replays the held-back particle draws into this pass's input, then restores the draw's state. Soft particles read
-  // DLAA's composite (same scene, alpha kept, whether or not a debug view was shown) in place of the texture they now
+  // The upscaler's composite (same scene, alpha kept, whether or not a debug view was shown) in place of the texture they now
   // draw into; without this frame's composite they read nothing.
   ID3D11ShaderResourceView* post_input_snapshot = nullptr;
   if (resolve_state.composite_output_frame == resolve_state.frame_index) {
@@ -596,7 +601,7 @@ static bool OnDrawCall(reshade::api::command_list* cmd_list, const IssueDraw& is
     if (SUCCEEDED(device->CreateRenderTargetView(post_input, nullptr, &particle_recorder.post_input_rtv))) {
       particle_recorder.post_input = post_input;
     } else {
-      reshade::log::message(reshade::log::level::error, "batmanac DLAA: cannot draw into the post pass input; particles are drawn normally from the next frame");
+      reshade::log::message(reshade::log::level::error, "batmanac upscaling: cannot draw into the post pass input; particles are drawn normally from the next frame");
       particle_replay = false;
       particle_recorder.post_input = nullptr;
     }
@@ -696,8 +701,8 @@ static bool OnDrawCall(reshade::api::command_list* cmd_list, const IssueDraw& is
   return false;
 }
 
-// Texture LOD bias of -1 while DLAA runs, DLSS's recommendation at native resolution. Every mipmapped sampler gets a
-// biased twin at creation, bound after the game binds pixel samplers, so toggling DLAA applies at once.
+// Texture LOD bias of -1 while the upscaler runs, DLSS's recommendation at native resolution. Every mipmapped sampler gets a
+// biased twin at creation, bound after the game binds pixel samplers, so toggling anti-aliasing applies at once.
 struct BiasedSamplers {
   std::shared_mutex mutex;
   std::unordered_map<std::uint64_t, ID3D11SamplerState*> twins;
@@ -758,7 +763,7 @@ static void OnPushDescriptors(
     reshade::api::pipeline_layout layout,
     uint32_t layout_param,
     const reshade::api::descriptor_table_update& update) {
-  if (dlaa_enabled == 0.f || !dlaa_resolving.load() || update.type != reshade::api::descriptor_type::sampler
+  if (aa_enabled == 0.f || !aa_resolving.load() || update.type != reshade::api::descriptor_type::sampler
       || (stages & reshade::api::shader_stage::pixel) != reshade::api::shader_stage::pixel || update.count == 0u
       || update.count > D3D11_COMMONSHADER_SAMPLER_SLOT_COUNT) return;
   const auto* game_samplers = static_cast<const reshade::api::sampler*>(update.descriptors);
@@ -779,11 +784,11 @@ static void OnPushDescriptors(
   reinterpret_cast<ID3D11DeviceContext*>(cmd_list->get_native())->PSSetSamplers(update.binding + update.array_offset, update.count, bound.data());
 }
 
-// Copies the view constant buffer (VS b1) of the frame's first draw into the main depth before the DLAA pass into the
+// Copies the view constant buffer (VS b1) of the frame's first draw into the main depth before the upscaler pass into the
 // frame's staging slot, for the view pairing readback.
 static void CaptureViewBuffer(ID3D11DeviceContext* context) {
   const std::uint32_t slot = static_cast<std::uint32_t>(resolve_state.frame_index % ViewPairing::SLOTS);
-  if (dlaa_enabled == 0.f || view_pairing.copied_frame[slot] == resolve_state.frame_index
+  if (aa_enabled == 0.f || view_pairing.copied_frame[slot] == resolve_state.frame_index
       || resolve_state.last_resolve_frame == resolve_state.frame_index) return;
   ID3D11DepthStencilView* depth_view = nullptr;
   context->OMGetRenderTargets(0u, nullptr, &depth_view);
@@ -884,8 +889,47 @@ static void OnInitPipeline(
 }
 
 static void OnInitDevice(reshade::api::device* device) {
-  if (dlaa_device != nullptr) return;
-  dlaa_device = device;
+  if (game_device != nullptr) return;
+  game_device = device;
+
+  // The game's GPU, where the host makes its devices, and whether DLSS can run there (an NVIDIA GPU and nvngx_dlss.dll
+  // next to the host): read now, so the menu offers only what can run.
+  IDXGIDevice* dxgi_device = nullptr;
+  IDXGIAdapter* adapter = nullptr;
+  DXGI_ADAPTER_DESC adapter_desc = {};
+  HRESULT adapter_result = reinterpret_cast<ID3D11Device*>(device->get_native())->QueryInterface(IID_PPV_ARGS(&dxgi_device));
+  if (SUCCEEDED(adapter_result)) {
+    adapter_result = dxgi_device->GetAdapter(&adapter);
+  }
+  if (SUCCEEDED(adapter_result)) {
+    adapter_result = adapter->GetDesc(&adapter_desc);
+  }
+  if (FAILED(adapter_result)) {
+    WarnOnce("cannot read the GPU adapter; the NVIDIA check is skipped and the host may not find the game's GPU", adapter_result);
+  }
+  for (IUnknown* object : std::initializer_list<IUnknown*>{adapter, dxgi_device}) {
+    if (object != nullptr) {
+      object->Release();
+    }
+  }
+  host_link.adapter_luid = adapter_desc.AdapterLuid;
+  HMODULE addon_module = nullptr;
+  GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                     reinterpret_cast<LPCWSTR>(&OnInitDevice), &addon_module);
+  std::array<wchar_t, MAX_PATH> addon_path = {};
+  GetModuleFileNameW(addon_module, addon_path.data(), static_cast<DWORD>(addon_path.size()));
+  const std::filesystem::path addon_folder = std::filesystem::path(addon_path.data()).parent_path();
+  host_link.host_path = (addon_folder / HOST_EXECUTABLE).wstring();
+  constexpr UINT NVIDIA_VENDOR_ID = 0x10DEu;
+  std::error_code exists_error;
+  if (adapter_desc.VendorId != 0u && adapter_desc.VendorId != NVIDIA_VENDOR_ID) {
+    dlss_available = false;
+    reshade::log::message(reshade::log::level::info,
+                          std::format("batmanac upscaling: the GPU (vendor 0x{:04X}) is not an NVIDIA GPU; FSR replaces DLAA", adapter_desc.VendorId).c_str());
+  } else if (!std::filesystem::exists(addon_folder / L"nvngx_dlss.dll", exists_error)) {
+    dlss_available = false;
+    reshade::log::message(reshade::log::level::info, "batmanac upscaling: nvngx_dlss.dll is not next to the add-on; FSR replaces DLAA");
+  }
   if (scene_view_trampoline != nullptr) return;
 
   auto* image = reinterpret_cast<std::byte*>(GetModuleHandleW(nullptr));
@@ -919,8 +963,7 @@ static void OnInitDevice(reshade::api::device* device) {
     }
   }
   if (match_count != 1u) {
-    reshade::log::message(reshade::log::level::warning,
-                          std::format("batmanac DLAA: CalcSceneView pattern found {} times; camera jitter unavailable", match_count).c_str());
+    TurnOffAntiAliasing(std::format("CalcSceneView pattern found {} times; camera jitter unavailable", match_count));
     return;
   }
 
@@ -929,17 +972,17 @@ static void OnInitDevice(reshade::api::device* device) {
     renodx::utils::detour::Install(std::array{renodx::utils::detour::Function(&scene_view_trampoline, &SceneViewAllocationStub)});
   } catch (const std::exception& error) {
     scene_view_trampoline = nullptr;
-    reshade::log::message(reshade::log::level::error, std::format("batmanac DLAA: hook failed: {}", error.what()).c_str());
+    TurnOffAntiAliasing(std::format("cannot hook CalcSceneView ({}); camera jitter unavailable", error.what()));
     return;
   }
   reshade::log::message(reshade::log::level::info,
-                        std::format("batmanac DLAA: CalcSceneView hooked at 0x{:08X}", reinterpret_cast<std::uintptr_t>(match)).c_str());
+                        std::format("batmanac upscaling: CalcSceneView hooked at 0x{:08X}", reinterpret_cast<std::uintptr_t>(match)).c_str());
 }
 
 
 static void OnDestroyDevice(reshade::api::device* device) {
-  if (device != dlaa_device) return;
-  dlaa_device = nullptr;
+  if (device != game_device) return;
+  game_device = nullptr;
   DestroyOutputs(device);
   if (resolve_state.prepare_pipeline.handle != 0u) {
     device->destroy_pipeline(resolve_state.prepare_pipeline);
@@ -977,35 +1020,52 @@ static void OnDestroyDevice(reshade::api::device* device) {
     motion_vertex_shaders.shaders.clear();
   }
   resolve_state = {};
-  dlaa_resolving.store(false);
-  dlaa_supported = true;
+  aa_resolving.store(false);
+  dlss_available = true;
   // The last answer is read while the watcher can still free the GPU from a host that does not give it; a host ended
   // for it has exited before the watcher is stopped, so the watcher sees the exit.
   ReadHostAnswer(1000u);
   // The host is ended in any case: after a failure it may still wait for requests from this live process, and a healthy
   // one holds the names a new device's host would use. Its last signal runs first; if it never does, the watcher frees
   // the game's GPU once the host has exited.
-  if (const HRESULT signal_result = WaitForHostSignal(); FAILED(signal_result)) {
+  if (const HRESULT signal_result = WaitForFenceValue(host_link.done_value, 5000u); FAILED(signal_result)) {
     WarnOnce("the host's last fence signal was not confirmed; the host is ended anyway", signal_result);
   }
-  if (dlaa_state.host_process != nullptr) {
-    TerminateProcess(dlaa_state.host_process, 1u);
-    WaitForSingleObject(dlaa_state.host_process, INFINITE);
+  if (host_link.host_process != nullptr) {
+    TerminateProcess(host_link.host_process, 1u);
+    WaitForSingleObject(host_link.host_process, INFINITE);
   }
-  if (dlaa_state.watcher != nullptr) {
-    SetEvent(dlaa_state.watcher_stop);
-    WaitForSingleObject(dlaa_state.watcher, INFINITE);
+  if (host_link.watcher != nullptr) {
+    // The game's GPU may wait on a newer request than the last answer: the watcher rescues it now that the host has
+    // exited, so it is stopped only once the fence reached that value (at most 15 s).
+    if (const HRESULT rescue_result = WaitForFenceValue(host_link.gpu_waited_value, 15000u); FAILED(rescue_result)) {
+      WarnOnce("the game's last request was not answered before the watcher stopped", rescue_result);
+    }
+    SetEvent(host_link.watcher_stop);
+    WaitForSingleObject(host_link.watcher, INFINITE);
   }
-  ReleaseDlaaTextures();
-  if (dlaa_state.block != nullptr) {
-    UnmapViewOfFile(dlaa_state.block);
+  ReleaseSharedTextures();
+  if (host_link.block != nullptr) {
+    UnmapViewOfFile(host_link.block);
   }
-  for (HANDLE handle : {dlaa_state.mapping, dlaa_state.request_event, dlaa_state.done_event, dlaa_state.host_process, dlaa_state.watcher, dlaa_state.watcher_stop}) {
+  for (HANDLE handle : {host_link.mapping, host_link.request_event, host_link.done_event, host_link.host_process, host_link.watcher, host_link.watcher_stop}) {
     if (handle != nullptr) {
       CloseHandle(handle);
     }
   }
-  dlaa_state = {};
+  const bool failed = host_link.failed;
+  host_link = {};
+  // A failure only held the binding off: once it is cleared, the setting's current value (a preset or Reset All may have
+  // changed it) applies again on the next device.
+  if (failed && renodx::utils::settings::settings != nullptr) {
+    if (auto* setting = renodx::utils::settings::FindSetting(AA_SETTING_KEY); setting != nullptr) {
+      setting->Write();
+    }
+  }
+  {
+    const std::unique_lock lock(upscaler_status.mutex);
+    upscaler_status.text.clear();
+  }
   {
     const std::unique_lock lock(host_watch.mutex);
     host_watch.awaited_value = 0u;
@@ -1015,7 +1075,7 @@ static void OnDestroyDevice(reshade::api::device* device) {
   try {
     renodx::utils::detour::Uninstall(std::array{renodx::utils::detour::Function(&scene_view_trampoline, &SceneViewAllocationStub)});
   } catch (const std::exception& error) {
-    reshade::log::message(reshade::log::level::error, std::format("batmanac DLAA: unhook failed: {}", error.what()).c_str());
+    reshade::log::message(reshade::log::level::error, std::format("batmanac upscaling: unhook failed: {}", error.what()).c_str());
     return;
   }
   scene_view_trampoline = nullptr;
@@ -1028,10 +1088,10 @@ static void OnPresent(
     const reshade::api::rect* dest_rect,
     uint32_t dirty_rect_count,
     const reshade::api::rect* dirty_rects) {
-  if (swapchain->get_device() != dlaa_device) return;
+  if (swapchain->get_device() != game_device) return;
   const reshade::api::resource_desc back_buffer_desc = swapchain->get_device()->get_resource_desc(swapchain->get_current_back_buffer());
   ++resolve_state.frame_index;
-  dlaa_resolving.store(resolve_state.last_resolve_frame != UINT64_MAX && resolve_state.last_resolve_frame + 2u >= resolve_state.frame_index);
+  aa_resolving.store(resolve_state.last_resolve_frame != UINT64_MAX && resolve_state.last_resolve_frame + 2u >= resolve_state.frame_index);
   auto* immediate_context = reinterpret_cast<ID3D11DeviceContext*>(queue->get_immediate_command_list()->get_native());
   if (resolve_state.frame_index >= 3u) {
     const std::uint64_t checked_frame = resolve_state.frame_index - 3u;
@@ -1108,11 +1168,11 @@ static void OnPresent(
     }
   }
 #ifndef NDEBUG
-  if (dlaa_enabled != 0.f && resolve_state.frame_index - resolve_state.last_logged_frame >= 120u) {
+  if (aa_enabled != 0.f && resolve_state.frame_index - resolve_state.last_logged_frame >= 120u) {
     resolve_state.last_logged_frame = resolve_state.frame_index;
     reshade::log::message(reshade::log::level::info,
-                          std::format("batmanac DLAA: last 120 frames: {} pass draws, {} resolves ({} after the fog), host wait {:.2f} ms per resolve (max {:.2f}), {} empty-queue reuses, {} scene skips, "
-                                      "max queue {} (at present {}), {} skinned draws with motion, {} without, {} captured draws, {} particle draws replayed after DLAA, view pairing {} match / {} mismatch / {} position changes (now {}) / {} unread",
+                          std::format("batmanac upscaling: last 120 frames: {} pass draws, {} resolves ({} after the fog), host wait {:.2f} ms per resolve (max {:.2f}), {} empty-queue reuses, {} scene skips, "
+                                      "max queue {} (at present {}), {} skinned draws with motion, {} without, {} captured draws, {} particle draws replayed after the upscaler, view pairing {} match / {} mismatch / {} position changes (now {}) / {} unread",
                                       resolve_state.pass_draws, resolve_state.resolves, resolve_state.fog_resolves,
                                       resolve_state.host_wait_milliseconds / std::max(resolve_state.resolves, 1u), resolve_state.host_wait_max_milliseconds,
                                       resolve_state.empty_queue_reuses, resolve_state.scene_skips,
@@ -1142,7 +1202,7 @@ static void OnPresent(
   view_queue.render_width = static_cast<float>(back_buffer_desc.texture.width);
   view_queue.render_height = static_cast<float>(back_buffer_desc.texture.height);
   resolve_state.max_present_queue_size = std::max(resolve_state.max_present_queue_size, view_queue.pending_views.size());
-  // Frames without a resolve (menus, DLAA off) leave views behind; keep at most a frame of lead.
+  // Frames without a resolve (menus, anti-aliasing off) leave views behind; keep at most a frame of lead.
   while (view_queue.pending_views.size() > 2u) {
     view_queue.pending_views.pop_front();
   }
@@ -1178,4 +1238,4 @@ static void Use(DWORD fdw_reason, ShaderInjectData* injection) {
   }
 }
 
-}  // namespace batmanac::dlaa
+}  // namespace batmanac::upscaling

@@ -1,8 +1,8 @@
-// DLAA inputs from the jittered scene: color, device depth, motion in pixels (current to previous), and the mask that
+// The upscaler's inputs from the jittered scene: color, device depth, motion in pixels (current to previous), and the mask that
 // biases DLSS toward the current frame. Static surfaces get the camera's motion; characters get their own motion where
 // it was captured, else the camera's motion and full bias.
 
-#include "./dlaa_common.hlsli"
+#include "./upscaling_common.hlsli"
 
 // 1 where a skinned mesh (characters, the cape) is the visible surface.
 Texture2D<float> character_mask_texture : register(t1);
@@ -18,7 +18,7 @@ RWTexture2D<float> depth_output : register(u0);
 RWTexture2D<float2> motion_vector_output : register(u1);
 RWTexture2D<float> bias_mask_output : register(u2);
 RWTexture2D<float4> color_output : register(u3);
-// Replaces the DLAA output on screen while a debug view is selected.
+// Replaces the upscaler's output on screen while a debug view is selected.
 RWTexture2D<float4> debug_output : register(u4);
 
 // Debug views: hue is the direction, brightness the length (full at full_length pixels).
@@ -70,7 +70,8 @@ void main(uint3 dispatch_thread_id: SV_DispatchThreadID) {
 
   // 1 - device depth, as the scene alpha stores it: from the motion pass where a skinned draw wrote its depth.
   const float surface_alpha = (character_depth > 0.f ? 1.f - character_depth : scene.a);
-  depth_output[pixel] = 1.f - surface_alpha;
+  // Device depth reaches P[2][2] at infinity; divided by it, infinity is 1 as DLSS and FSR expect.
+  depth_output[pixel] = (1.f - surface_alpha) / (1.f - projection_terms.z);
 
   // The view point is homogeneous, (x, y, 1, 1 / view distance): distant surfaces keep their precision, and the sky
   // becomes a point at infinity.

@@ -17,6 +17,7 @@
 #include <mutex>
 #include <new>
 #include <shared_mutex>
+#include <string>
 #include <string_view>
 #include <unordered_map>
 #include <unordered_set>
@@ -26,9 +27,9 @@
 
 #include "../shared.h"
 
-// State the DLAA passes share: the views the game thread queues for the render thread and their pairing, each
+// State the upscaling passes share: the views the game thread queues for the render thread and their pairing, each
 // moving draw's captured data, the frame's motion batches and the settings.
-namespace batmanac::dlaa {
+namespace batmanac::upscaling {
 
 // UE3 FMatrix: row-major, row vectors (clip = position * matrix).
 struct Matrix4 {
@@ -125,7 +126,7 @@ struct MotionBatch {
   std::vector<MotionObject> objects;
 };
 
-// Render-thread state of the DLAA pass.
+// Render-thread state of the upscaling pass.
 struct ResolveState {
   // The composite copied over a scene read through a view of the game's, and the debug view's output.
   std::array<ComputeTarget, 2> outputs = {};
@@ -136,7 +137,7 @@ struct ResolveState {
   reshade::api::pipeline_layout layout = {0};
   reshade::api::pipeline prepare_pipeline = {0};
   reshade::api::pipeline composite_pipeline = {0};
-  // While the scene is the bound render target, DLAA's output is drawn over it: a triangle covering the screen that writes
+  // While the scene is the bound render target, the upscaler's output is drawn over it: a triangle covering the screen that writes
   // color only.
   ID3D11VertexShader* composite_vertex_shader = nullptr;
   ID3D11PixelShader* composite_pixel_shader = nullptr;
@@ -183,7 +184,7 @@ struct ResolveState {
   // The view buffer (b1) of the main view by frame parity, for taking each frame's jitter out of the motion.
   std::array<ID3D11Buffer*, 2> view_copies = {};
   std::array<std::uint64_t, 2> view_copy_frames = {UINT64_MAX, UINT64_MAX};
-  // This frame's non-tessellated draws with motion, drawn in one pass before DLAA reads the motion targets (their
+  // This frame's non-tessellated draws with motion, drawn in one pass before the upscaler reads the motion targets (their
   // objects referenced).
   std::vector<MotionBatch> motion_batches;
   // The view buffers of this frame and the previous frame, from the frame's first batched draw.
@@ -218,7 +219,7 @@ struct ResolveState {
   ID3D11PixelShader* tessellated_mask_shader = nullptr;
 };
 
-struct DlaaConstants {
+struct UpscalingConstants {
   std::array<float, 16> view_to_previous_clip = {};
   std::array<float, 4> projection_terms = {};
   float character_mask_valid = 0.f;
@@ -274,20 +275,35 @@ struct ViewPairing {
 };
 static ViewPairing view_pairing;
 static ShaderInjectData* shader_injection = nullptr;
-static float dlaa_enabled = 0.f;
-// False once the game's GPU turned out not to be NVIDIA's: DLSS cannot run there, so the setting is hidden.
-static bool dlaa_supported = true;
-// True while DLAA resolved in the last two frames. The camera jitter and the texture LOD bias only help then; while it
+static float aa_enabled = 0.f;
+// The Anti-Aliasing setting's key: after a failure, its value applies again on the next device.
+inline constexpr const char* AA_SETTING_KEY = "DLAA";
+// False once DLSS turned out unable to run (not an NVIDIA GPU, or the host found no DLSS or its feature failed): the
+// method is then FSR and the choice is hidden.
+static bool dlss_available = true;
+// True while the upscaler resolved in the last two frames. The camera jitter and the texture LOD bias only help then; while it
 // starts, after a failure or with MSAA on they would shake and sharpen the game's own image.
-static std::atomic<bool> dlaa_resolving = false;
+static std::atomic<bool> aa_resolving = false;
 // NVSDK_NGX_DLSS_Hint_Render_Preset value: 0 default, 10 J, 11 K, 12 L, 13 M. K keeps thin geometry steady but averages
 // away falling snow and animated lights; L keeps those and shimmers on railings and grates.
-static float dlaa_preset = 11.f;
-// Frames without the scene fog run DLAA before the first post pass instead: snow, rain and the main menu's dirt
+static float dlss_preset = 11.f;
+// What the menu shows under the anti-aliasing settings: the upscaler the host runs and its version, or why anti-aliasing
+// turned itself off.
+struct UpscalerStatus {
+  std::shared_mutex mutex;
+  std::string text;
+};
+static UpscalerStatus upscaler_status;
+// The player's Upscaler choice; where DLSS cannot run, FSR is used instead. A change makes a new texture generation.
+static float upscaler = 0.f;
+// FSR's RCAS pass (1 on) and its strength, 0 to 1.
+static float fsr_sharpening = 1.f;
+static float fsr_sharpness = 0.8f;
+// Frames without the scene fog run the upscaler before the first post pass instead: snow, rain and the main menu's dirt
 // overlay are held back and replayed over its output. Off when the replay target cannot be created.
 static bool particle_replay = true;
 
-// Failures DLAA keeps running through, with less: each message is logged once per session.
+// Failures the upscaler keeps running through, with less: each message is logged once per session.
 struct LoggedWarnings {
   std::shared_mutex mutex;
   std::unordered_set<std::string_view> messages;
@@ -304,10 +320,10 @@ static void WarnOnce(std::string_view message, HRESULT result) {
       logged_warnings.messages.insert(message);
     }
     reshade::log::message(reshade::log::level::warning,
-                          std::format("batmanac DLAA: {} (0x{:08X})", message, static_cast<std::uint32_t>(result)).c_str());
+                          std::format("batmanac upscaling: {} (0x{:08X})", message, static_cast<std::uint32_t>(result)).c_str());
   } catch (const std::bad_alloc&) {
     // No-op: out of memory the warning is dropped, so the caller's fallback still runs.
   }
 }
 
-}  // namespace batmanac::dlaa
+}  // namespace batmanac::upscaling

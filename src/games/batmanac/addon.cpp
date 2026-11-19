@@ -11,6 +11,7 @@
 #include <cmath>
 #include <cstdint>
 #include <mutex>
+#include <shared_mutex>
 #include <string>
 
 #include <deps/imgui/imgui.h>
@@ -28,7 +29,7 @@
 #include "../../utils/settings.hpp"
 #include "../../utils/swapchain.hpp"
 #include "./shared.h"
-#include "./dlaa/dlaa.hpp"
+#include "./upscaling/upscaling.hpp"
 
 namespace {
 
@@ -462,21 +463,72 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved) {
         renodx::mods::swapchain::prevent_full_screen = (prevent_full_screen_setting->GetValue() == 1.f);
 
         settings.push_back(new renodx::utils::settings::Setting{
-            .key = "DLAA",
-            .binding = &batmanac::dlaa::dlaa_enabled,
+            .key = batmanac::upscaling::AA_SETTING_KEY,
+            .binding = &batmanac::upscaling::aa_enabled,
             .value_type = renodx::utils::settings::SettingValueType::INTEGER,
             .default_value = 0.f,
-            .label = "DLAA",
+            .label = "Anti-Aliasing",
             .section = "Anti-Aliasing",
             .tooltip =
-                "NVIDIA DLAA. Needs an NVIDIA RTX GPU and anti-aliasing off in the game's launcher (no MSAA, no FXAA).\n"
-                "With MSAA on, or if DLAA cannot start, it turns itself off and the game's image stays as it is.",
+                "Temporal anti-aliasing at native resolution, by the method below. Needs anti-aliasing off in the game's\n"
+                "launcher (no MSAA, no FXAA). With MSAA on, or if it cannot start, it turns itself off and the game's image\n"
+                "stays as it is.",
             .labels = {"Off", "On"},
-            .is_visible = []() { return batmanac::dlaa::dlaa_supported; },
+            // Greyed out after a failure: the choice stays as saved, and the status line below says why it is off.
+            .is_enabled = []() { return !batmanac::upscaling::host_link.failed; },
+            // Every write (overlay, preset, Reset All) keeps anti-aliasing off while a failure stands; the saved choice stays.
+            .parse = [](float value) { return (batmanac::upscaling::host_link.failed ? 0.f : value); },
+        });
+        settings.push_back(new renodx::utils::settings::Setting{
+            .key = "DLAAMethod",
+            .binding = &batmanac::upscaling::upscaler,
+            .value_type = renodx::utils::settings::SettingValueType::INTEGER,
+            .default_value = 0.f,
+            .label = "Upscaling Method",
+            .section = "Anti-Aliasing",
+            .tooltip =
+                "DLAA: NVIDIA DLAA (an NVIDIA RTX GPU and nvngx_dlss.dll next to the add-on).\n"
+                "FSR: AMD FSR at native resolution (FSR 4 on GPUs that support it, FSR 3.1 elsewhere).\n"
+                "Needs amd_fidelityfx_loader_dx12.dll and amd_fidelityfx_upscaler_dx12.dll next to the helper.",
+            .labels = {"DLAA", "FSR"},
+            .is_visible = []() { return batmanac::upscaling::aa_enabled != 0.f && batmanac::upscaling::dlss_available; },
+        });
+        // Where DLAA cannot run, the method is FSR and shown without a choice.
+        settings.push_back(new renodx::utils::settings::Setting{
+            .value_type = renodx::utils::settings::SettingValueType::LABEL,
+            .label = "Upscaling Method",
+            .section = "Anti-Aliasing",
+            .tooltip = "DLAA needs an NVIDIA RTX GPU and nvngx_dlss.dll next to the add-on; ReShade.log says why it is not offered.",
+            .labels = {"FSR"},
+            .is_visible = []() { return batmanac::upscaling::aa_enabled != 0.f && !batmanac::upscaling::dlss_available; },
+        });
+        settings.push_back(new renodx::utils::settings::Setting{
+            .key = "FSRSharpening",
+            .binding = &batmanac::upscaling::fsr_sharpening,
+            .value_type = renodx::utils::settings::SettingValueType::INTEGER,
+            .default_value = 1.f,
+            .label = "FSR Sharpening",
+            .section = "Anti-Aliasing",
+            .tooltip = "FSR's own sharpening pass (RCAS).",
+            .labels = {"Off", "On"},
+            .is_visible = []() { return batmanac::upscaling::aa_enabled != 0.f && (batmanac::upscaling::upscaler == 1.f || !batmanac::upscaling::dlss_available); },
+        });
+        settings.push_back(new renodx::utils::settings::Setting{
+            .key = "FSRSharpness",
+            .binding = &batmanac::upscaling::fsr_sharpness,
+            .default_value = 80.f,
+            .label = "FSR Sharpness",
+            .section = "Anti-Aliasing",
+            .tooltip = "Strength of FSR's sharpening, from its lightest (0) to its strongest (100).",
+            .max = 100.f,
+            .parse = [](float value) { return value * 0.01f; },
+            .is_visible = []() {
+              return batmanac::upscaling::aa_enabled != 0.f && (batmanac::upscaling::upscaler == 1.f || !batmanac::upscaling::dlss_available) && batmanac::upscaling::fsr_sharpening != 0.f;
+            },
         });
         settings.push_back(new renodx::utils::settings::Setting{
             .key = "DLAAPreset",
-            .binding = &batmanac::dlaa::dlaa_preset,
+            .binding = &batmanac::upscaling::dlss_preset,
             .value_type = renodx::utils::settings::SettingValueType::INTEGER,
             .default_value = 2.f,
             .label = "DLAA Preset",
@@ -487,7 +539,23 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved) {
             .labels = {"Default", "J", "K", "L", "M"},
             // Menu index -> NVSDK_NGX_DLSS_Hint_Render_Preset: J is 10, then one per letter.
             .parse = [](float value) { return (value == 0.f ? 0.f : value + 9.f); },
-            .is_visible = []() { return batmanac::dlaa::dlaa_enabled != 0.f; },
+            .is_visible = []() { return batmanac::upscaling::aa_enabled != 0.f && batmanac::upscaling::upscaler == 0.f && batmanac::upscaling::dlss_available; },
+        });
+        settings.push_back(new renodx::utils::settings::Setting{
+            .value_type = renodx::utils::settings::SettingValueType::CUSTOM,
+            .label = "Upscaler Status",
+            .section = "Anti-Aliasing",
+            .on_draw = []() {
+              std::string status;
+              {
+                const std::shared_lock lock(batmanac::upscaling::upscaler_status.mutex);
+                status = batmanac::upscaling::upscaler_status.text;
+              }
+              ImGui::TextDisabled("%s", (status.empty() ? "Starting" : status.c_str()));
+              return false;
+            },
+            // Also after a failure, which turns anti-aliasing off and names the reason.
+            .is_visible = []() { return batmanac::upscaling::aa_enabled != 0.f || batmanac::upscaling::host_link.failed; },
         });
 #ifndef NDEBUG
         settings.push_back(new renodx::utils::settings::Setting{
@@ -498,7 +566,7 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved) {
             .label = "DLAA Debug View",
             .section = "Anti-Aliasing",
             .labels = {"Off", "Motion Vectors", "Character Motion"},
-            .is_visible = []() { return batmanac::dlaa::dlaa_enabled != 0.f; },
+            .is_visible = []() { return batmanac::upscaling::aa_enabled != 0.f; },
         });
 #endif
 
@@ -517,7 +585,7 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved) {
   renodx::utils::settings::Use(fdw_reason, &settings, &OnPresetOff);
   renodx::mods::swapchain::Use(fdw_reason, &shader_injection);
   renodx::mods::shader::Use(fdw_reason, custom_shaders, &shader_injection);
-  batmanac::dlaa::Use(fdw_reason, &shader_injection);
+  batmanac::upscaling::Use(fdw_reason, &shader_injection);
 
   return TRUE;
 }

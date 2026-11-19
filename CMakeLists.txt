@@ -841,15 +841,27 @@ endforeach()
 
 if(RENODX_TARGET_ARCHITECTURE STREQUAL "x64")
   # Batman: Arkham City is a 32-bit game and DLSS only ships for x64: its DLAA runs in this helper process.
-  add_executable(batmanac_dlaa_host64 WIN32 src/games/batmanac/dlaa_host64.cpp)
+  add_executable(batmanac_dlaa_host64 WIN32 src/games/batmanac/helper/upscaler_host64.cpp)
   target_compile_definitions(batmanac_dlaa_host64 PRIVATE NOMINMAX UNICODE _UNICODE)
   target_include_directories(batmanac_dlaa_host64 SYSTEM PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/external/DLSS/include)
-  target_link_libraries(batmanac_dlaa_host64 PRIVATE d3d11 dxgi ${CMAKE_CURRENT_SOURCE_DIR}/external/DLSS/lib/Windows_x86_64/x64/nvsdk_ngx_s.lib)
+  target_link_libraries(batmanac_dlaa_host64 PRIVATE d3d11 dxgi version ${CMAKE_CURRENT_SOURCE_DIR}/external/DLSS/lib/Windows_x86_64/x64/nvsdk_ngx_s.lib)
   # nvsdk_ngx_s.lib is built against the release static runtime.
   set_target_properties(batmanac_dlaa_host64 PROPERTIES
     MSVC_RUNTIME_LIBRARY "MultiThreaded"
     OUTPUT_NAME "renodx-batmanac-dlaa-host64"
   )
+  # AMD's FSR SDK (MIT, GPUOpen-LibrariesAndSDKs/FidelityFX-SDK) when it sits in build/downloads/fsr/sdk: its headers,
+  # and its signed DLLs copied next to the helper, which loads them at run time. Without it the helper builds without FSR.
+  set(BATMANAC_FSR_KIT ${CMAKE_CURRENT_SOURCE_DIR}/build/downloads/fsr/sdk/Kits/FidelityFX)
+  if(EXISTS ${BATMANAC_FSR_KIT}/api/include/ffx_api.h)
+    target_include_directories(batmanac_dlaa_host64 SYSTEM PRIVATE ${BATMANAC_FSR_KIT}/api/include ${BATMANAC_FSR_KIT}/upscalers/include)
+    add_custom_command(TARGET batmanac_dlaa_host64 POST_BUILD
+      COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        ${BATMANAC_FSR_KIT}/signedbin/amd_fidelityfx_loader_dx12.dll
+        ${BATMANAC_FSR_KIT}/signedbin/amd_fidelityfx_upscaler_dx12.dll
+        $<TARGET_FILE_DIR:batmanac_dlaa_host64>
+    )
+  endif()
 endif()
 
 list(LENGTH SKIPPED_ADDON_TARGETS SKIPPED_ADDON_TARGET_COUNT)

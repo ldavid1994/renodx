@@ -24,15 +24,15 @@
 #include <include/reshade.hpp>
 
 #include "../../../utils/state.hpp"
-#include "./dlaa_host.hpp"
-#include "./dlaa_state.hpp"
+#include "./host_link.hpp"
+#include "./upscaling_state.hpp"
 #include "../shared.h"
 
 // Per-object motion: moving draws stream out their positions; one pass per frame draws the batched motion before
-// DLAA reads it, and a tessellated draw draws its own.
-namespace batmanac::dlaa {
+// the upscaler reads it, and a tessellated draw draws its own.
+namespace batmanac::upscaling {
 
-// Forgets the batched motion: drawn, or dropped with a frame that never reached DLAA.
+// Forgets the batched motion: drawn, or dropped with a frame that never reached the upscaler.
 static void ResetMotionBatch() {
   for (IUnknown* object : std::initializer_list<IUnknown*>{resolve_state.batch_view, resolve_state.batch_previous_view}) {
     if (object != nullptr) {
@@ -234,8 +234,8 @@ static void ReleaseCharacterTargets() {
 // draw_range: index or vertex count, instance count, first index or vertex, base vertex.
 template <typename IssueDraw>
 static bool MarkCharacter(reshade::api::command_list* cmd_list, const std::array<std::uint32_t, 4>& draw_range, const IssueDraw& issue_draw) {
-  // Skinned draws after DLAA ran this frame (translucent hair, for example) have nothing to hand it.
-  if (dlaa_enabled == 0.f || resolve_state.last_resolve_frame == resolve_state.frame_index) return false;
+  // Skinned draws after the upscaler ran this frame (translucent hair, for example) have nothing to hand it.
+  if (aa_enabled == 0.f || resolve_state.last_resolve_frame == resolve_state.frame_index) return false;
   const std::uint32_t vertex_shader = renodx::utils::state::GetCurrentShaderHash(cmd_list, reshade::api::pipeline_stage::vertex_shader);
   bool skinned = false;
   ID3D11GeometryShader* stream_out_shader = nullptr;
@@ -385,7 +385,7 @@ static bool MarkCharacter(reshade::api::command_list* cmd_list, const std::array
         .DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ZERO,
         .DepthFunc = D3D11_COMPARISON_EQUAL,
     };
-    // Drawn as depth, read by the DLAA input pass as the tessellated surfaces' device depth.
+    // Drawn as depth, read by the upscaler's input pass as the tessellated surfaces' device depth.
     D3D11_TEXTURE2D_DESC tessellated_depth_desc = mask_desc;
     tessellated_depth_desc.Format = DXGI_FORMAT_R32_TYPELESS;
     tessellated_depth_desc.BindFlags = D3D11_BIND_DEPTH_STENCIL | D3D11_BIND_SHADER_RESOURCE;
@@ -405,7 +405,7 @@ static bool MarkCharacter(reshade::api::command_list* cmd_list, const std::array
     const bool created = SUCCEEDED(device->CreateTexture2D(&mask_desc, nullptr, &resolve_state.character_mask))
                          && SUCCEEDED(device->CreateRenderTargetView(resolve_state.character_mask, nullptr, &resolve_state.character_mask_rtv))
                          && SUCCEEDED(device->CreateShaderResourceView(resolve_state.character_mask, nullptr, &resolve_state.character_mask_srv))
-                         && SUCCEEDED(device->CreatePixelShader(__dlaa_character_mask.data(), __dlaa_character_mask.size(), nullptr, &resolve_state.character_mask_shader))
+                         && SUCCEEDED(device->CreatePixelShader(__upscaling_character_mask.data(), __upscaling_character_mask.size(), nullptr, &resolve_state.character_mask_shader))
                          && SUCCEEDED(device->CreateDepthStencilState(&depth_state_desc, &resolve_state.character_mask_depth_state))
                          && SUCCEEDED(device->CreateTexture2D(&motion_desc, nullptr, &resolve_state.character_motion))
                          && SUCCEEDED(device->CreateRenderTargetView(resolve_state.character_motion, nullptr, &resolve_state.character_motion_rtv))
@@ -413,10 +413,10 @@ static bool MarkCharacter(reshade::api::command_list* cmd_list, const std::array
                          && SUCCEEDED(device->CreateTexture2D(&character_depth_desc, nullptr, &resolve_state.character_depth))
                          && SUCCEEDED(device->CreateRenderTargetView(resolve_state.character_depth, nullptr, &resolve_state.character_depth_rtv))
                          && SUCCEEDED(device->CreateShaderResourceView(resolve_state.character_depth, nullptr, &resolve_state.character_depth_srv))
-                         && SUCCEEDED(device->CreateVertexShader(__dlaa_motion_vertex.data(), __dlaa_motion_vertex.size(), nullptr, &resolve_state.motion_vertex_shader))
-                         && SUCCEEDED(device->CreatePixelShader(__dlaa_motion_pixel.data(), __dlaa_motion_pixel.size(), nullptr, &resolve_state.motion_pixel_shader))
+                         && SUCCEEDED(device->CreateVertexShader(__upscaling_motion_vertex.data(), __upscaling_motion_vertex.size(), nullptr, &resolve_state.motion_vertex_shader))
+                         && SUCCEEDED(device->CreatePixelShader(__upscaling_motion_pixel.data(), __upscaling_motion_pixel.size(), nullptr, &resolve_state.motion_pixel_shader))
                          && SUCCEEDED(device->CreateInputLayout(motion_input_elements.data(), static_cast<UINT>(motion_input_elements.size()),
-                                                                __dlaa_motion_vertex.data(), __dlaa_motion_vertex.size(), &resolve_state.motion_input_layout))
+                                                                __upscaling_motion_vertex.data(), __upscaling_motion_vertex.size(), &resolve_state.motion_input_layout))
                          && SUCCEEDED(device->CreateTexture2D(&motion_desc, nullptr, &resolve_state.tessellated_motion))
                          && SUCCEEDED(device->CreateRenderTargetView(resolve_state.tessellated_motion, nullptr, &resolve_state.tessellated_motion_rtv))
                          && SUCCEEDED(device->CreateShaderResourceView(resolve_state.tessellated_motion, nullptr, &resolve_state.tessellated_motion_srv))
@@ -424,12 +424,12 @@ static bool MarkCharacter(reshade::api::command_list* cmd_list, const std::array
                          && SUCCEEDED(device->CreateDepthStencilView(resolve_state.tessellated_depth, &tessellated_dsv_desc, &resolve_state.tessellated_depth_dsv))
                          && SUCCEEDED(device->CreateShaderResourceView(resolve_state.tessellated_depth, &tessellated_srv_desc, &resolve_state.tessellated_depth_srv))
                          && SUCCEEDED(device->CreateDepthStencilState(&tessellated_depth_state_desc, &resolve_state.tessellated_depth_state))
-                         && SUCCEEDED(device->CreateVertexShader(__dlaa_motion_world_vertex.data(), __dlaa_motion_world_vertex.size(), nullptr, &resolve_state.motion_world_vertex_shader))
-                         && SUCCEEDED(device->CreatePixelShader(__dlaa_tessellated_mask.data(), __dlaa_tessellated_mask.size(), nullptr, &resolve_state.tessellated_mask_shader));
+                         && SUCCEEDED(device->CreateVertexShader(__upscaling_motion_world_vertex.data(), __upscaling_motion_world_vertex.size(), nullptr, &resolve_state.motion_world_vertex_shader))
+                         && SUCCEEDED(device->CreatePixelShader(__upscaling_tessellated_mask.data(), __upscaling_tessellated_mask.size(), nullptr, &resolve_state.tessellated_mask_shader));
     device->Release();
     if (!created) {
       ReleaseCharacterTargets();
-      FailDlaa("cannot create the character targets");
+      TurnOffAntiAliasing("cannot create the character targets");
       release_render_targets();
       return false;
     }
@@ -843,4 +843,4 @@ static bool MarkCharacter(reshade::api::command_list* cmd_list, const std::array
   return true;
 }
 
-}  // namespace batmanac::dlaa
+}  // namespace batmanac::upscaling
