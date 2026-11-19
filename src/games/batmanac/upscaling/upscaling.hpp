@@ -34,11 +34,11 @@
 #include "../../../utils/hash.hpp"
 #include "../../../utils/settings.hpp"
 #include "../../../utils/state.hpp"
+#include "../shared.h"
 #include "./host_link.hpp"
 #include "./upscaling_motion.hpp"
 #include "./upscaling_particles.hpp"
 #include "./upscaling_state.hpp"
-#include "../shared.h"
 
 // Temporal anti-aliasing (NVIDIA DLAA or AMD FSR at native resolution) for a game without it. The player view's projection matrix is jittered where
 // ULocalPlayer::CalcSceneView hands it to the FSceneView constructor: every matrix the renderer derives from it
@@ -51,7 +51,7 @@ static void* scene_view_trampoline = nullptr;
 // The game's device: the first one created while none is tracked. Other devices leave the upscaler alone.
 static reshade::api::device* game_device = nullptr;
 
-static void __cdecl OnCalcSceneView(Matrix4* view_matrix, Matrix4* projection_matrix) {
+static void __cdecl OnCalcSceneView(const Matrix4* view_matrix, Matrix4* projection_matrix) {
   const std::unique_lock lock(view_queue.mutex);
   ViewMatrices& view = view_queue.pending_views.emplace_back(ViewMatrices{.view_matrix = *view_matrix, .projection_matrix = *projection_matrix});
   while (view_queue.pending_views.size() > 4u) {
@@ -381,13 +381,12 @@ static bool Resolve(reshade::api::command_list* cmd_list, reshade::api::resource
     context->OMGetRenderTargets(static_cast<UINT>(saved_render_targets.size()), saved_render_targets.data(), &saved_depth_view);
     context->OMSetRenderTargets(0u, nullptr, nullptr);
   }
-  const bool resolved = RunUpscaler(current_view, history_valid, [&]() {
-    dispatch(resolve_state.prepare_pipeline,
-             {scene_srv, native_view(resolve_state.character_mask_srv), native_view(resolve_state.character_motion_srv),
-              native_view(resolve_state.character_depth_srv), native_view(resolve_state.tessellated_motion_srv),
-              native_view(resolve_state.tessellated_depth_srv)},
-             {native_view(host_link.depth_uav), native_view(host_link.motion_vector_uav), native_view(host_link.bias_mask_uav),
-              native_view(host_link.color_uav), debug_output.uav}); }, [&]() {
+  const bool resolved = RunUpscaler(current_view, history_valid, [&]() { dispatch(resolve_state.prepare_pipeline,
+                                                                                  {scene_srv, native_view(resolve_state.character_mask_srv), native_view(resolve_state.character_motion_srv),
+                                                                                   native_view(resolve_state.character_depth_srv), native_view(resolve_state.tessellated_motion_srv),
+                                                                                   native_view(resolve_state.tessellated_depth_srv)},
+                                                                                  {native_view(host_link.depth_uav), native_view(host_link.motion_vector_uav), native_view(host_link.bias_mask_uav),
+                                                                                   native_view(host_link.color_uav), debug_output.uav}); }, [&]() {
     if (!scene_is_target) {
       dispatch(resolve_state.composite_pipeline,
                {scene_srv, native_view(host_link.output_srv), reshade::api::resource_view{0}, reshade::api::resource_view{0}, reshade::api::resource_view{0},
@@ -769,6 +768,8 @@ static void OnPushDescriptors(
       || update.count > D3D11_COMMONSHADER_SAMPLER_SLOT_COUNT) return;
   const auto* game_samplers = static_cast<const reshade::api::sampler*>(update.descriptors);
   std::array<ID3D11SamplerState*, D3D11_COMMONSHADER_SAMPLER_SLOT_COUNT> bound = {};
+  // The twins are referenced while bound: the map can drop one once the lock is released.
+  std::array<ID3D11SamplerState*, D3D11_COMMONSHADER_SAMPLER_SLOT_COUNT> referenced_twins = {};
   bool replaced = false;
   {
     const std::shared_lock lock(biased_samplers.mutex);
@@ -776,13 +777,20 @@ static void OnPushDescriptors(
       bound[i] = reinterpret_cast<ID3D11SamplerState*>(game_samplers[i].handle);
       if (auto twin = biased_samplers.twins.find(game_samplers[i].handle); twin != biased_samplers.twins.end()) {
         const auto& [game_sampler, twin_sampler] = *twin;
+        twin_sampler->AddRef();
         bound[i] = twin_sampler;
+        referenced_twins[i] = twin_sampler;
         replaced = true;
       }
     }
   }
   if (!replaced) return;
   reinterpret_cast<ID3D11DeviceContext*>(cmd_list->get_native())->PSSetSamplers(update.binding + update.array_offset, update.count, bound.data());
+  for (ID3D11SamplerState* twin_sampler : referenced_twins) {
+    if (twin_sampler != nullptr) {
+      twin_sampler->Release();
+    }
+  }
 }
 
 // Copies the view constant buffer (VS b1) of the frame's first draw into the main depth before the upscaler pass into the
@@ -979,7 +987,6 @@ static void OnInitDevice(reshade::api::device* device) {
   reshade::log::message(reshade::log::level::info,
                         std::format("batmanac upscaling: CalcSceneView hooked at 0x{:08X}", reinterpret_cast<std::uintptr_t>(match)).c_str());
 }
-
 
 static void OnDestroyDevice(reshade::api::device* device) {
   if (device != game_device) return;
@@ -1180,7 +1187,8 @@ static void OnPresent(
                                       resolve_state.empty_queue_reuses, resolve_state.scene_skips,
                                       resolve_state.max_queue_size, resolve_state.max_present_queue_size,
                                       resolve_state.motion_draws, resolve_state.motion_fallbacks, resolve_state.captured_constants.size(), resolve_state.recorded_particle_draws,
-                                      view_pairing.matches, view_pairing.mismatches, view_pairing.position_changes, view_pairing.position, view_pairing.unread).c_str());
+                                      view_pairing.matches, view_pairing.mismatches, view_pairing.position_changes, view_pairing.position, view_pairing.unread)
+                              .c_str());
     resolve_state.pass_draws = 0u;
     resolve_state.resolves = 0u;
     resolve_state.fog_resolves = 0u;

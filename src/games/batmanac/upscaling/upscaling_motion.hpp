@@ -24,9 +24,9 @@
 #include <include/reshade.hpp>
 
 #include "../../../utils/state.hpp"
+#include "../shared.h"
 #include "./host_link.hpp"
 #include "./upscaling_state.hpp"
-#include "../shared.h"
 
 // Per-object motion: moving draws stream out their positions; one pass per frame draws the batched motion before
 // the upscaler reads it, and a tessellated draw draws its own.

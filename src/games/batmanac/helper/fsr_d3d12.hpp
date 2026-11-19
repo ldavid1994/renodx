@@ -9,9 +9,9 @@
 
 #pragma once
 
-#include <Windows.h>
 #include <d3d12.h>
 #include <dxgi1_2.h>
+#include <Windows.h>
 
 #include <array>
 #include <chrono>

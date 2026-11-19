@@ -290,11 +290,10 @@ static bool ReadHostAnswer(DWORD timeout) {
 // Starts the host and (re)creates the shared textures for the scene size. False while the host is starting or after
 // a failure.
 static bool StartHost(ID3D11DeviceContext* context, std::uint32_t width, std::uint32_t height) {
-
   if (host_link.block == nullptr) {
     const DWORD process_id = GetCurrentProcessId();
     host_link.mapping = CreateFileMappingW(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE, 0u, sizeof(SharedBlock),
-                                            std::format(L"{}{}", SHARED_BLOCK_NAME, process_id).c_str());
+                                           std::format(L"{}{}", SHARED_BLOCK_NAME, process_id).c_str());
     host_link.request_event = CreateEventW(nullptr, FALSE, FALSE, std::format(L"{}{}", REQUEST_EVENT_NAME, process_id).c_str());
     host_link.done_event = CreateEventW(nullptr, FALSE, FALSE, std::format(L"{}{}", DONE_EVENT_NAME, process_id).c_str());
     host_link.watcher_stop = CreateEventW(nullptr, TRUE, FALSE, nullptr);
@@ -405,7 +404,7 @@ static bool StartHost(ID3D11DeviceContext* context, std::uint32_t width, std::ui
   created = created && SUCCEEDED(device->QueryInterface(IID_PPV_ARGS(&device5)))
             && SUCCEEDED(device5->CreateFence(0u, D3D11_FENCE_FLAG_SHARED, IID_PPV_ARGS(&host_link.fence)))
             && SUCCEEDED(host_link.fence->CreateSharedHandle(nullptr, GENERIC_ALL, std::format(L"{}{}_{}", SHARED_FENCE_NAME_PREFIX, GetCurrentProcessId(), generation).c_str(),
-                                                              &host_link.fence_handle))
+                                                             &host_link.fence_handle))
             && DuplicateHandle(GetCurrentProcess(), host_link.fence_handle, host_link.host_process, &host_fence_handle, 0u, FALSE, DUPLICATE_SAME_ACCESS) != FALSE
             && SUCCEEDED(context->QueryInterface(IID_PPV_ARGS(&host_link.context)));
   if (device5 != nullptr) {

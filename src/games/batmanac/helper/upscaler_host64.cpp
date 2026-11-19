@@ -7,10 +7,10 @@
 // add-on starts it with its process id, shares the inputs and the output as textures on the same adapter, ordered by a
 // shared fence, and signals one event per frame.
 
-#include <Windows.h>
 #include <d3d11_4.h>
 #include <d3d12.h>
 #include <dxgi1_2.h>
+#include <Windows.h>
 
 #include <algorithm>
 #include <array>
@@ -39,29 +39,28 @@ void Log(const std::string& message) {
   log_file.flush();
 }
 
-// The adapter with this LUID, or null.
-IDXGIAdapter1* FindAdapter(std::uint32_t luid_low, std::int32_t luid_high) {
-  IDXGIFactory1* factory = nullptr;
-  IDXGIAdapter1* found = nullptr;
-  if (FAILED(CreateDXGIFactory1(IID_PPV_ARGS(&factory)))) return nullptr;
-  IDXGIAdapter1* adapter = nullptr;
-  for (UINT index = 0u; found == nullptr && factory->EnumAdapters1(index, &adapter) != DXGI_ERROR_NOT_FOUND; ++index) {
-    DXGI_ADAPTER_DESC1 adapter_desc = {};
-    adapter->GetDesc1(&adapter_desc);
-    if (adapter_desc.AdapterLuid.LowPart == luid_low && adapter_desc.AdapterLuid.HighPart == luid_high) {
-      found = adapter;
-    } else {
-      adapter->Release();
-    }
-  }
-  factory->Release();
-  return found;
-}
-
 }  // namespace
 
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE previous_instance, PWSTR command_line, int show_command) {
   namespace protocol = batmanac::upscaling;
+  // The adapter with this LUID, or null.
+  auto find_adapter = [](std::uint32_t luid_low, std::int32_t luid_high) -> IDXGIAdapter1* {
+    IDXGIFactory1* factory = nullptr;
+    IDXGIAdapter1* found = nullptr;
+    if (FAILED(CreateDXGIFactory1(IID_PPV_ARGS(&factory)))) return nullptr;
+    IDXGIAdapter1* adapter = nullptr;
+    for (UINT index = 0u; found == nullptr && factory->EnumAdapters1(index, &adapter) != DXGI_ERROR_NOT_FOUND; ++index) {
+      DXGI_ADAPTER_DESC1 adapter_desc = {};
+      adapter->GetDesc1(&adapter_desc);
+      if (adapter_desc.AdapterLuid.LowPart == luid_low && adapter_desc.AdapterLuid.HighPart == luid_high) {
+        found = adapter;
+      } else {
+        adapter->Release();
+      }
+    }
+    factory->Release();
+    return found;
+  };
 
   std::array<wchar_t, MAX_PATH> executable_path = {};
   GetModuleFileNameW(nullptr, executable_path.data(), static_cast<DWORD>(executable_path.size()));
@@ -81,7 +80,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE previous_instance, PWSTR comma
     const auto luid_high = static_cast<std::int32_t>(std::wcstol(next, &next, 10));
     HMODULE d3d12 = LoadLibraryW(L"d3d12.dll");
     auto* create_device = (d3d12 != nullptr ? reinterpret_cast<PFN_D3D12_CREATE_DEVICE>(GetProcAddress(d3d12, "D3D12CreateDevice")) : nullptr);
-    IDXGIAdapter1* adapter = FindAdapter(luid_low, luid_high);
+    IDXGIAdapter1* adapter = find_adapter(luid_low, luid_high);
     ID3D12Device* device = nullptr;
     HANDLE handle = nullptr;
     ID3D12Fence* fence = nullptr;
@@ -153,7 +152,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE previous_instance, PWSTR comma
   };
 
   // A device on the game's adapter, so the shared textures stay on the same GPU.
-  IDXGIAdapter1* game_adapter = FindAdapter(block->adapter_luid_low, block->adapter_luid_high);
+  IDXGIAdapter1* game_adapter = find_adapter(block->adapter_luid_low, block->adapter_luid_high);
   if (game_adapter == nullptr) {
     fail("the game's adapter was not found", 0);
     return 1;
@@ -207,8 +206,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE previous_instance, PWSTR comma
   } else {
     constexpr std::uint16_t EXPOSURE_ONE = 0x3C00u;
     const D3D11_TEXTURE2D_DESC exposure_desc = {
-        .Width = 1u, .Height = 1u, .MipLevels = 1u, .ArraySize = 1u, .Format = DXGI_FORMAT_R16_FLOAT,
-        .SampleDesc = {.Count = 1u}, .Usage = D3D11_USAGE_IMMUTABLE, .BindFlags = D3D11_BIND_SHADER_RESOURCE};
+        .Width = 1u, .Height = 1u, .MipLevels = 1u, .ArraySize = 1u, .Format = DXGI_FORMAT_R16_FLOAT, .SampleDesc = {.Count = 1u}, .Usage = D3D11_USAGE_IMMUTABLE, .BindFlags = D3D11_BIND_SHADER_RESOURCE};
     const D3D11_SUBRESOURCE_DATA exposure_data = {.pSysMem = &EXPOSURE_ONE, .SysMemPitch = sizeof(EXPOSURE_ONE)};
     if (const HRESULT result = device->CreateTexture2D(&exposure_desc, &exposure_data, &exposure_texture); FAILED(result)) {
       give_up_dlss("cannot create the exposure texture", result);
@@ -353,7 +351,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE previous_instance, PWSTR comma
         release_shared();
         bool opened = fsr.device != nullptr;
         if (!opened) {
-          IDXGIAdapter1* adapter = FindAdapter(block->adapter_luid_low, block->adapter_luid_high);
+          IDXGIAdapter1* adapter = find_adapter(block->adapter_luid_low, block->adapter_luid_high);
           opened = adapter != nullptr && fsr.Start(adapter, host_folder);
           if (adapter != nullptr) {
             adapter->Release();

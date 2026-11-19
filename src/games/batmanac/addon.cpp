@@ -522,9 +522,7 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved) {
             .tooltip = "Strength of FSR's sharpening, from its lightest (0) to its strongest (100).",
             .max = 100.f,
             .parse = [](float value) { return value * 0.01f; },
-            .is_visible = []() {
-              return batmanac::upscaling::aa_enabled != 0.f && (batmanac::upscaling::upscaler == 1.f || !batmanac::upscaling::dlss_available) && batmanac::upscaling::fsr_sharpening != 0.f;
-            },
+            .is_visible = []() { return batmanac::upscaling::aa_enabled != 0.f && (batmanac::upscaling::upscaler == 1.f || !batmanac::upscaling::dlss_available) && batmanac::upscaling::fsr_sharpening != 0.f; },
         });
         settings.push_back(new renodx::utils::settings::Setting{
             .key = "DLAAPreset",
@@ -552,8 +550,7 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved) {
                 status = batmanac::upscaling::upscaler_status.text;
               }
               ImGui::TextDisabled("%s", (status.empty() ? "Starting" : status.c_str()));
-              return false;
-            },
+              return false; },
             // Also after a failure, which turns anti-aliasing off and names the reason.
             .is_visible = []() { return batmanac::upscaling::aa_enabled != 0.f || batmanac::upscaling::host_link.failed; },
         });
