@@ -1,0 +1,25 @@
+# Fork only: after each snapshot build, attach this fork's own add-ons to the
+# snapshot release, copied from their per-mod releases.
+name: fork add-ons
+
+on:
+  workflow_run:
+    workflows: [snapshot]
+    types: [completed]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  attach:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - name: Copy add-ons into the snapshot release
+        run: |
+          gh release download scct-snapshot -D out
+          gh release download batmanac-snapshot -D out
+          gh release upload snapshot out/* --clobber
